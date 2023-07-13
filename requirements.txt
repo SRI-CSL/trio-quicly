@@ -1,0 +1,13 @@
+# We're pinning our tooling, because it's an environment we can strictly control.
+# On the other hand, we're not pinning package dependencies, because our tests
+# needs to pass with the latest version of the packages.
+# Reference: https://github.com/encode/httpx/pull/1721#discussion_r661241588
+#-e .[brotli,cli,http2,socks]
+
+# Tests & Linting
+black==23.3.0
+coverage[toml]==7.2.7
+cryptography==41.0.1
+pytest==7.4.0
+trio==0.22.1
+trio-typing==0.8.0
