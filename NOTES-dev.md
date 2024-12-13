@@ -36,4 +36,10 @@ TODO...
 
 ## Building
 
-TODO...
+```
+$ poetry build
+```
+
+## Generating Documentation
+
+and uploading, too?...
