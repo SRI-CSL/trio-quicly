@@ -14,6 +14,10 @@ $ source venv/bin/activate
 $ pipx ensurepath
 $ source ~/.bashrc
 ```
+or using this script:
+```
+$ curl -sSL https://install.python-poetry.org | python3 -
+```
 
 Once you have `poetry` do:
 ```
