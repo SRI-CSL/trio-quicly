@@ -47,6 +47,7 @@ exceptiongroup = { version = ">=1.2.2", python = "<3.11"}
 # see https://youtrack.jetbrains.com/issue/PY-48909
 # and https://github.com/JetBrains/intellij-community/commit/3f37786ec0bf5066e4527690d1068b5a00680ea3
 #setuptools = { version = ">=60", python = "<3.10" }
+tox = "^4.23.2"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.4"

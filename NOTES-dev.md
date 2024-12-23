@@ -31,18 +31,25 @@ $ poetry show --tree
 $ poetry show --tree --why cffi  # to see which dependencies require `cffi`
 ```
 
-## Developing and Testing in Poetry Virtual Env
+## Developing and Testing in Poetry
 
-To run your script simply use `poetry run python your_script.py`. Likewise if you have command line tools such as 
-`pytest` or `black` you can run them using `poetry run pytest`.
+To run your script simply use `poetry run python your_script.py`. 
 
-TODO...
+Develop in Python 3.10: `$ poetry env use python3.10`
 
-## Building
+To run tests in development Python: `$ poetry run pytest`
+
+To run all tests in all supported Python versions, use `$ poetry run tox`
+See also: https://pytest-with-eric.com/automation/pytest-tox-poetry/#Step-by-step-guide-on-setting-up-a-project-with-these-tools
+TODO: add other test env's like "coverage"
+
+## Building and Publishing
 
 ```
 $ poetry build
+$ poetry publish  # need credentials!
 ```
+See also for GitHub Actions integration: https://github.com/ethho/poetry-demo
 
 ## Generating Documentation
 
