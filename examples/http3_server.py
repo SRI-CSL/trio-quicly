@@ -1,7 +1,11 @@
 import argparse
 import functools
 import logging
+import sys
 import trio
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import ExceptionGroup
 
 
 async def main(
