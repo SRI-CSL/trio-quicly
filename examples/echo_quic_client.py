@@ -17,24 +17,25 @@ PORT = 12345
 
 async def sender(client_stream):
     print("sender: started!")
-    for pings in range(10):
+    for pings in range(3):
         message = b'test ' + str(pings).encode()
         print(f"sender: sending {message!r}")
         await client_stream.send_all(message)
         await trio.sleep(1)
+    await client_stream.aclose()
 
 async def receiver(client_stream):
     print("receiver: started!")
     async for data in client_stream:
         print(f"receiver: got data {data!r}")
     print("receiver: connection closed")
-    sys.exit()
+    raise KeyboardInterrupt
 
 async def parent():
-    print(f"parent: connecting to 127.0.0.1:{PORT}")
+    host = "127.0.0.1"  # "127.0.0.1"  # "::1"
+    print(f"parent: connecting to {host}:{PORT}")
     # TODO: also test with IPv6!
-    client_conn = await open_quic_connection("127.0.0.1", PORT)
-
+    client_conn = await open_quic_connection(host, PORT)
     async with client_conn:
         async with trio.open_nursery() as nursery:
             print("parent: spawning sender...")

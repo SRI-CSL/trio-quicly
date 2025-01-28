@@ -20,12 +20,12 @@ async def echo_handler(server_stream: SimpleQuicConnection) -> None:
     # Assign each connection a unique number to make our debug prints easier
     # to understand when there are multiple simultaneous connections.
     ident = next(CONNECTION_COUNTER)
-    print(f"echo {ident}: started")
+    print(f"echo for connection {ident}: started")
     try:
         async for data in server_stream:
-            print(f"echo {ident}: received data {data!r}")
+            print(f"echo for connection {ident}: received data {data!r}")
             await server_stream.send_all(data)
-        print(f"echo {ident}: connection closed")
+        print(f"echo for connection {ident}: connection closed")
     # FIXME: add discussion of (Base)ExceptionGroup to the tutorial, and use
     # exceptiongroup.catch() here. (Not important in this case, but important
     # if the server code uses nurseries internally.)
