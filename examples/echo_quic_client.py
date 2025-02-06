@@ -1,5 +1,7 @@
 # echo-client.py
 import sys
+import random
+
 import trio
 
 from trioquic.client import open_quic_connection
@@ -17,12 +19,12 @@ PORT = 12345
 
 async def sender(client_stream):
     print("sender: started!")
-    for pings in range(3):
-        message = b'test ' + str(pings).encode()
-        print(f"sender: sending {message!r}")
-        await client_stream.send_all(message)
-        await trio.sleep(1)
-    await client_stream.aclose()
+    async with client_stream:
+        for pings in range(3):
+            message = b'test ' + str(pings).encode()
+            print(f"sender: sending {message!r}")
+            await client_stream.send_all(message)
+            await trio.sleep(random.random())
 
 async def receiver(client_stream):
     print("receiver: started!")
@@ -31,19 +33,27 @@ async def receiver(client_stream):
     print("receiver: connection closed")
     raise KeyboardInterrupt
 
-async def parent():
+async def parent(num: int = 0):
     host = "127.0.0.1"  # "127.0.0.1"  # "::1"
-    print(f"parent: connecting to {host}:{PORT}")
-    # TODO: also test with IPv6!
+
     client_conn = await open_quic_connection(host, PORT)
+    print(f'Starting client {num}')
+
     async with client_conn:
         async with trio.open_nursery() as nursery:
-            print("parent: spawning sender...")
+            print(f"parent: spawning sender for client {num} ...")
             nursery.start_soon(sender, client_conn)
-            print("parent: spawning receiver...")
+            print(f"parent: spawning receiver for client {num}...")
             nursery.start_soon(receiver, client_conn)
 
+async def two_clients():
+    async with trio.open_nursery() as nursery:
+        # Make two concurrent calls to child()
+        nursery.start_soon(parent, 1)
+        nursery.start_soon(parent, 2)
+
 try:
-    trio.run(parent, )
+    # trio.run(parent, )
+    trio.run(two_clients, )
 except* KeyboardInterrupt:
     pass

@@ -2,16 +2,18 @@ import errno
 import trio
 from typing import *
 
+from trio._highlevel_serve_listeners import StreamT, Handler
+
 from trioquic.configuration import QuicConfiguration
-from trioquic.connection import SimpleQuicConnection, QuicListener
+from trioquic.connection import SimpleQuicConnection, QuicServer, PosArgsT
 
 
-async def open_quic_listeners(
+async def open_quic_servers(
     port: int,
     *,
     host: str | bytes | None = None,
-) -> list[QuicListener]:
-    """Create :class:`QuicListener` objects to listen for QUIC connections.
+) -> list[QuicServer]:
+    """Create :class:`QuicServer` objects to listen for QUIC connections.
 
     Args:
 
@@ -21,14 +23,14 @@ async def open_quic_listeners(
           an arbitrary open port. But be careful: if you use this feature when
           binding to multiple IP addresses, then each IP address will get its
           own random port, and the returned listeners will probably be
-          listening on different ports. In particular, this will happen if you
-          use ``host=None`` – which is the default – because in this case
-          :func:`open_tcp_listeners` will bind to both the IPv4 wildcard
-          address (``0.0.0.0``) and also the IPv6 wildcard address (``::``).
+          listening on different ports. Note, unlike
+          :func:`trio.open_tcp_listeners`, this will not happen if you
+          use ``host=None`` – which is the default; if ``host=None`` we prefer
+          binding to the IPv6 wildcard address (``::``) and enabling dual-stack
+          support so that IPv4 clients are also supported.
 
       host (str, bytes, or None): The local interface to bind to. This is
-          passed to :func:`~socket.getaddrinfo` with the ``AI_PASSIVE`` flag
-          set.
+          passed to :func:`~socket.getaddrinfo`.
 
           If you want to bind to the wildcard address on both IPv4 and IPv6,
           in order to accept connections on all available interfaces, then
@@ -43,7 +45,7 @@ async def open_quic_listeners(
           ``"0.0.0.0"`` for IPv4-only and ``"::"`` for IPv6-only.
 
     Returns:
-      list of :class:`QuicListener`
+      list of :class:`QuicServer`
 
     Raises:
       :class:`TypeError` if invalid arguments.
@@ -66,28 +68,70 @@ async def open_quic_listeners(
     listeners = []
     unsupported_address_families = []
     try:
-        for family, stype, proto, _, sockaddr in addresses:
-            assert ( stype == trio.socket.SOCK_DGRAM ), "only working with UDP sockets"
+        if host is None:
+            # just open one listener on the wildcard address;
+            # if AF_INET6 in possible addresses then enable dual-stack:
+            unique_families = {tup[0] for tup in addresses}
+            if trio.socket.AF_INET6 in unique_families:
+                family = trio.socket.AF_INET6
+            elif len(unique_families):
+                family = unique_families.pop()
+            else:
+                raise OSError(errno.EAFNOSUPPORT,
+                              "This system does not support required socket")
+
+            server_socket = None
             try:
-                sock = trio.socket.socket(family, stype, proto)
+                server_socket = trio.socket.socket(family,
+                                                   type=trio.socket.SOCK_DGRAM,
+                                                   proto=trio.socket.IPPROTO_UDP)
+                if family == trio.socket.AF_INET6:
+                    # explicitly enable IPv4/IPv6 dual stack
+                    server_socket.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 0)
+                await server_socket.bind((host, port))
+                listeners.append(QuicServer(server_socket))
             except OSError as ex:
                 if ex.errno == errno.EAFNOSUPPORT:
-                    # If a system only supports IPv4, or only IPv6, it
-                    # is still likely that getaddrinfo will return
-                    # both an IPv4 and an IPv6 address. As long as at
-                    # least one of the returned addresses can be
-                    # turned into a socket, we won't complain about a
-                    # failure to create the other.
+                    # If a system only supports IPv4 but getaddrinfo
+                    # returns both an IPv4 and an IPv6 address then
+                    # we might be out of luck.  One can force then
+                    # IPv4-only with "0.0.0.0" as the host address.
                     unsupported_address_families.append(ex)
-                    continue
                 else:
+                    if server_socket is not None:
+                        server_socket.close()
                     raise
-            try:
-                await sock.bind(sockaddr)
-                listeners.append(QuicListener(sock))
-            except:
-                sock.close()
-                raise
+        else:
+            # go through all addresses and try to open one listener for each
+            for family, stype, proto, _, sockaddr in addresses:
+                assert ( stype == trio.socket.SOCK_DGRAM ), "only working with UDP sockets"
+                try:
+                    sock = trio.socket.socket(family, stype, proto)
+                except OSError as ex:
+                    if ex.errno == errno.EAFNOSUPPORT:
+                        # If a system only supports IPv4, or only IPv6, it
+                        # is still likely that getaddrinfo will return
+                        # both an IPv4 and an IPv6 address. As long as at
+                        # least one of the returned addresses can be
+                        # turned into a socket, we won't complain about a
+                        # failure to create the other.
+                        unsupported_address_families.append(ex)
+                        continue
+                    else:
+                        raise
+                try:
+                    if family == trio.socket.AF_INET6:
+                        if host == "::":
+                            # only support IPv6
+                            sock.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 1)
+                        else:
+                            # explicitly enable IPv4/IPv6 dual stack
+                            sock.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 0)
+                    await sock.bind(sockaddr)
+                    listeners.append(QuicServer(sock))
+                except:
+                    sock.close()
+                    raise
     except:
         for listener in listeners:
             listener.socket.close()
@@ -105,38 +149,30 @@ async def open_quic_listeners(
 
     return listeners
 
+async def _run_handler(stream: StreamT, handler: Handler[StreamT]) -> None:
+    try:
+        await handler(stream)
+    finally:
+        await trio.aclose_forcefully(stream)
+
 async def serve_quic(
-    connection_handler: Callable[[SimpleQuicConnection], Awaitable[object]],
+    connection_handler: Callable[[SimpleQuicConnection, Unpack[PosArgsT]], Awaitable[object]],
     port: int,
-    *,
+    *args,
     host: str | bytes = None,
-    handler_nursery: Optional[trio.Nursery] = None,
-    task_status: trio.TaskStatus[list[QuicListener]] = trio.TASK_STATUS_IGNORED,
-    configuration: Optional[QuicConfiguration] = None,
+    handler_nursery: trio.Nursery | None = None,
+    task_status: trio.TaskStatus[list[QuicServer]] = trio.TASK_STATUS_IGNORED,
+    configuration: QuicConfiguration | None = None,
     # session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
     # session_ticket_handler: Optional[SessionTicketHandler] = None,
     # retry: bool = False,
-    # stream_handler: Optional[QuicStreamHandler] = None,
 ) -> None:
     """
-    Listen for incoming connections, and spawn a handler for each using an
-    internal nursery.
-
-    Similar to `~trio.serve_tcp`, this function never returns until cancelled or
-    all handlers have exited.
-
-    Usage commonly looks like::
-
-        async def handler(quic_connection):
-            ...
-
-        async with trio.open_nursery() as nursery:
-            await nursery.start(trioquic.trio.serve_quick, ssl_context, handler)
-            # ... do other things here ...
+    Start at least one (more if given host resolves to multiple addresses) QUIC
+    server.  Similar to `~trio.serve_tcp`, this function never returns until
+    cancelled or all QUIC servers have exited.
 
     Args:
-      # ssl_context (OpenSSL.SSL.Context): The PyOpenSSL context object to use for
-        incoming connections.
       connection_handler: The handler function that will be invoked for each incoming
         connection.
       port (int): The port to listen on. Use 0 to let the kernel pick an open port.
@@ -151,11 +187,16 @@ async def serve_quic(
     ) if configuration is None else configuration
     assert (server_configuration.is_client is False), "server configuration must not also be client"
 
-    # modeled after `trio.serve_tcp`:
-    listeners = await open_quic_listeners(port, host=host)
-    await trio.serve_listeners(
-        connection_handler,
-        listeners,
-        handler_nursery=handler_nursery,
-        task_status=task_status,
+    servers = await open_quic_servers(port, host=host)
+    # modeled after `trio.serve_listeners`:
+    async with trio.open_nursery() as nursery:
+        for server in servers:
+            nursery.start_soon(server.serve, connection_handler, handler_nursery, *args)
+        # The listeners are already queueing connections when we're called,
+        # but we wait until the end to call started() just in case we get an
+        # error or whatever.
+        task_status.started(servers)
+
+    raise AssertionError(
+        "QuicServer.serve should never complete",
     )
