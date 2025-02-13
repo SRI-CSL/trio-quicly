@@ -22,6 +22,19 @@ class _Queue(Generic[_T]):
     def __init__(self, incoming_packets_buffer: int | float) -> None:  # noqa: PYI041
         self.s, self.r = trio.open_memory_channel[_T](incoming_packets_buffer)
 
+@contextmanager
+def _translate_socket_errors_to_stream_errors() -> Generator[None, None, None]:
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno in {
+            errno.EBADF, # Unix
+            errno.ENOTSOCK, # Windows
+        }:
+            raise trio.ClosedResourceError("this socket was already closed") from None
+        else:
+            raise trio.BrokenResourceError(f"socket connection broken: {exc}") from exc
+
 class QuicEndpoint:
     """A QUIC endpoint.  Should be instantiated as either a server or a client.
 
@@ -72,7 +85,7 @@ class QuicEndpoint:
 
         # We don't need to track handshaking vs non-handshake connections
         # separately. We only keep one connection per remote address.
-        # {remote address: QuicConnection}
+        # {remote address: QUIC connection}
         self.connections: dict[AddressFormat, SimpleQuicConnection] = {}
 
         self._send_lock = trio.Lock()
@@ -132,6 +145,29 @@ class QuicEndpoint:
         if self._closed:
             raise trio.ClosedResourceError
 
+    async def _send_to(self, data: bytes | bytearray | memoryview, remote_address: AddressFormat) -> None:
+        # modeled after `trio.SocketStream.send_all()` implementation
+        async with self._send_lock:
+            with _translate_socket_errors_to_stream_errors():
+                with memoryview(data) as data:
+                    if not data:
+                        if self.socket.fileno() == -1:
+                            raise trio.ClosedResourceError("socket was already closed")
+                        await trio.lowlevel.checkpoint()
+                        return
+                    total_sent = 0
+                    while total_sent < len(data):
+                        with data[total_sent:] as remaining:
+                            sent = await self.socket.sendto(remaining, remote_address)
+                        total_sent += sent
+
+    async def _wait_socket_writable(self) -> None:
+        async with self._send_lock:
+            if self.socket.fileno() == -1:
+                raise trio.ClosedResourceError
+            with _translate_socket_errors_to_stream_errors():
+                await self.socket.wait_writable()
+
 # @final
 # TODO: first approximation is to simply match 1 QUIC connection without handshake to 1 QUIC bidi stream
 class SimpleQuicConnection(trio.abc.Stream):
@@ -155,7 +191,6 @@ class SimpleQuicConnection(trio.abc.Stream):
 
         assert endpoint is not None, "Cannot create QUIC connection without endpoint"
         self.endpoint = endpoint
-        self.endpoint_socket = endpoint.socket  # TODO: remove?
 
         assert configuration.max_datagram_size >= SMALLEST_MAX_DATAGRAM_SIZE, (
             "The smallest allowed maximum datagram size is "
@@ -177,11 +212,10 @@ class SimpleQuicConnection(trio.abc.Stream):
         self._configuration = configuration
         self._is_client = configuration.is_client
 
-        self.remote_address: tuple[str | bytes, int] = remote_address
+        self.remote_address: AddressFormat = remote_address
         self._closed = False
         self._did_handshake = False
-        self._handshake_lock = trio.Lock()  # guard handshake TODO: move to Stream?
-        self._send_lock = trio.Lock()  # guard sending calls to socket TODO: move to Stream?
+        self._handshake_lock = trio.Lock()  # guard handshake TODO: move to Stream?  No, as handshake is per connection!
 
         self.q = _Queue[bytes](endpoint.incoming_packets_buffer)
 
@@ -279,34 +313,79 @@ class SimpleQuicConnection(trio.abc.Stream):
             self._did_handshake = True
 
     async def send_all(self, data: bytes | bytearray | memoryview) -> None:
+        """Sends the given data through the stream, blocking if necessary.
+
+        Args:
+          data (bytes, bytearray, or memoryview): The data to send.
+
+        Raises:
+          trio.BusyResourceError: if another task is already executing a
+              :meth:`send_all`, :meth:`wait_send_all_might_not_block`, or
+              :meth:`HalfCloseableStream.send_eof` on this stream.
+          trio.BrokenResourceError: if something has gone wrong, and the stream
+              is broken.
+          trio.ClosedResourceError: if you previously closed this stream
+              object, or if another task closes this stream object while
+              :meth:`send_all` is running.
+
+        Most low-level operations in Trio provide a guarantee: if they raise
+        :exc:`trio.Cancelled`, this means that they had no effect, so the
+        system remains in a known state. This is **not true** for
+        :meth:`send_all`. If this operation raises :exc:`trio.Cancelled` (or
+        any other exception for that matter), then it may have sent some, all,
+        or none of the requested data, and there is no way to know which.
+
+        """
+
         if self._closed:
             raise trio.ClosedResourceError("connection was already closed")
         # TODO: if QUIC Streams are also HalfClosable then do more state checking here...?
         if not self._did_handshake:
             await self.do_handshake()
-
-        # modeled after `trio.SocketStream.send_all()` implementation
-        # TODO: move into Endpoint (as it guards the socket)!
-        async with self._send_lock:
-            with _translate_socket_errors_to_stream_errors():
-                with memoryview(data) as data:
-                    if not data:
-                        if self.endpoint_socket.fileno() == -1:
-                            raise trio.ClosedResourceError("socket was already closed")
-                        await trio.lowlevel.checkpoint()
-                        return
-                    total_sent = 0
-                    while total_sent < len(data):
-                        with data[total_sent:] as remaining:
-                            sent = await self.endpoint_socket.sendto(remaining, self.remote_address)
-                        total_sent += sent
+        await self.endpoint._send_to(data, self.remote_address)
 
     async def wait_send_all_might_not_block(self) -> None:
-        async with self._send_lock:
-            if self.endpoint_socket.fileno() == -1:
-                raise trio.ClosedResourceError
-            with _translate_socket_errors_to_stream_errors():
-                await self.endpoint_socket.wait_writable()
+        """Block until it's possible that :meth:`send_all` might not block.
+
+        This method may return early: it's possible that after it returns,
+        :meth:`send_all` will still block. (In the worst case, if no better
+        implementation is available, then it might always return immediately
+        without blocking. It's nice to do better than that when possible,
+        though.)
+
+        This method **must not** return *late*: if it's possible for
+        :meth:`send_all` to complete without blocking, then it must
+        return. When implementing it, err on the side of returning early.
+
+        Raises:
+          trio.BusyResourceError: if another task is already executing a
+              :meth:`send_all`, :meth:`wait_send_all_might_not_block`, or
+              :meth:`HalfCloseableStream.send_eof` on this stream.
+          trio.BrokenResourceError: if something has gone wrong, and the stream
+              is broken.
+          trio.ClosedResourceError: if you previously closed this stream
+              object, or if another task closes this stream object while
+              :meth:`wait_send_all_might_not_block` is running.
+
+        Note:
+
+          This method is intended to aid in implementing protocols that want
+          to delay choosing which data to send until the last moment. E.g.,
+          suppose you're working on an implementation of a remote display server
+          like `VNC
+          <https://en.wikipedia.org/wiki/Virtual_Network_Computing>`__, and
+          the network connection is currently backed up so that if you call
+          :meth:`send_all` now then it will sit for 0.5 seconds before actually
+          sending anything. In this case it doesn't make sense to take a
+          screenshot, then wait 0.5 seconds, and then send it, because the
+          screen will keep changing while you wait; it's better to wait 0.5
+          seconds, then take the screenshot, and then send it, because this
+          way the data you deliver will be more
+          up-to-date. Using :meth:`wait_send_all_might_not_block` makes it
+          possible to implement the better strategy.
+
+        """
+        await self.endpoint._wait_socket_writable()
 
     async def receive_some(self, max_bytes: int | None = None) -> bytes | None:
         if self._closed:
@@ -318,11 +397,12 @@ class SimpleQuicConnection(trio.abc.Stream):
             max_bytes = MAX_UDP_PACKET_SIZE
         if max_bytes < 1:
             raise ValueError("max_bytes must be >= 1")
-        # TODO: observe potential chunking by max_bytes!
         try:
-            return await self.q.r.receive()
+            packet = await self.q.r.receive()
+            return packet[:max_bytes]
         except (trio.EndOfChannel, trio.ClosedResourceError):
-            return None
+            # we catch ClosedResource here as it comes from the Queue being closed
+            return b""
 
     # def create_stream(self, bidirectional: bool = True) -> QuicStream:
     #     return QuicBidiStream() if bidirectional else QuicSendStream()
@@ -332,19 +412,6 @@ class SimpleQuicConnection(trio.abc.Stream):
     #
     # def accept_stream(self, bidirectional: bool = True) -> QuicStream:
     #     return QuicBidiStream() if bidirectional else QuicReceiveStream()
-
-@contextmanager
-def _translate_socket_errors_to_stream_errors() -> Generator[None, None, None]:
-    try:
-        yield
-    except OSError as exc:
-        if exc.errno in {
-            errno.EBADF, # Unix
-            errno.ENOTSOCK, # Windows
-        }:
-            raise trio.ClosedResourceError("this socket was already closed") from None
-        else:
-            raise trio.BrokenResourceError(f"socket connection broken: {exc}") from exc
 
 async def quic_receive_loop(
     endpoint_ref: weakref.ReferenceType[QuicEndpoint],
@@ -526,6 +593,9 @@ class QuicClient(QuicEndpoint):
         initiate any I/O – it just sets up a `QuicConnection` object. The actual handshake
         doesn't occur until you start using the `QuicConnection`. This gives you a chance
         to do further configuration first, like setting MTU etc.
+
+        If this endpoint already manages a (prior) connection to the same remote address,
+        it will return the old connection after checking that it isn't closed.
 
         Args:
           remote_address: The address to connect to. Usually a (host, port) tuple, like

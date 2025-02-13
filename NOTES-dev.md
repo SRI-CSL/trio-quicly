@@ -54,3 +54,26 @@ See also for GitHub Actions integration: https://github.com/ethho/poetry-demo
 ## Generating Documentation
 
 TODO...
+
+## Troubleshooting
+
+Currently, updating minor versions of Python 3.x via Homebrew breaks `poetry` so we can reinstall using:
+(see also https://github.com/python-poetry/install.python-poetry.org/issues/71)
+
+```bash
+curl -sSL https://install.python-poetry.org | python3 - --uninstall
+curl -sSL https://install.python-poetry.org | python3
+```
+To recreate `poetry` environment and reinstall the packages for the Poetry environment in the current working directory:
+(see also for more Poetry fixes: https://stackoverflow.com/a/70064450/3816489)
+
+```bash
+# Enter the current Poetry environment
+poetry shell
+
+# Remove the current environment as referred by path to Python interpreter 
+poetry env remove $(which python)
+
+# Reinstall from Poetry's cache
+poetry install
+```

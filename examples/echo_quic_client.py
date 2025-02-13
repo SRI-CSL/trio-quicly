@@ -17,14 +17,15 @@ if sys.version_info < (3, 11):
 PORT = 12345
 
 
-async def sender(client_stream):
+async def sender(client_stream, num: int = 0):
     print("sender: started!")
     async with client_stream:
         for pings in range(3):
-            message = b'test ' + str(pings).encode()
+            message = b'test ' + str(pings).encode() + b' from client ' + str(num).encode()
             print(f"sender: sending {message!r}")
             await client_stream.send_all(message)
-            await trio.sleep(random.random())
+            await trio.sleep(float(random.randint(0, 10)) / 10.0)
+
 
 async def receiver(client_stream):
     print("receiver: started!")
@@ -32,6 +33,7 @@ async def receiver(client_stream):
         print(f"receiver: got data {data!r}")
     print("receiver: connection closed")
     raise KeyboardInterrupt
+
 
 async def parent(num: int = 0):
     host = "127.0.0.1"  # "127.0.0.1"  # "::1"
@@ -42,15 +44,17 @@ async def parent(num: int = 0):
     async with client_conn:
         async with trio.open_nursery() as nursery:
             print(f"parent: spawning sender for client {num} ...")
-            nursery.start_soon(sender, client_conn)
+            nursery.start_soon(sender, client_conn, num)
             print(f"parent: spawning receiver for client {num}...")
             nursery.start_soon(receiver, client_conn)
+
 
 async def two_clients():
     async with trio.open_nursery() as nursery:
         # Make two concurrent calls to child()
         nursery.start_soon(parent, 1)
         nursery.start_soon(parent, 2)
+
 
 try:
     # trio.run(parent, )
