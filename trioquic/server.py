@@ -89,7 +89,7 @@ async def open_quic_servers(
                     # explicitly enable IPv4/IPv6 dual stack
                     server_socket.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 0)
                 await server_socket.bind((host, port))
-                listeners.append(QuicServer(server_socket))
+                listeners.append(QuicServer(server_socket, (host, port)))
             except OSError as ex:
                 if ex.errno == errno.EAFNOSUPPORT:
                     # If a system only supports IPv4 but getaddrinfo
@@ -128,7 +128,7 @@ async def open_quic_servers(
                             # explicitly enable IPv4/IPv6 dual stack
                             sock.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 0)
                     await sock.bind(sockaddr)
-                    listeners.append(QuicServer(sock))
+                    listeners.append(QuicServer(sock, sockaddr))
                 except:
                     sock.close()
                     raise

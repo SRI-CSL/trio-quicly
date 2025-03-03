@@ -82,6 +82,7 @@ class QuicEndpoint:
 
         self.incoming_packets_buffer = incoming_packets_buffer
         self._token = trio.lowlevel.current_trio_token()
+        self.new_connections_q = _Queue[tuple[bytes, tuple[str, int]]](float("inf"))
 
         # We don't need to track handshaking vs non-handshake connections
         # separately. We only keep one connection per remote address.
@@ -92,7 +93,7 @@ class QuicEndpoint:
         self._closed = False
         self._receive_loop_spawned = False
 
-    def _ensure_receive_loop(self) -> None:
+    def ensure_receive_loop(self) -> None:
         # We have to spawn this lazily, because on Windows it will immediately error out
         # if the socket isn't already bound -- which for clients might not happen until
         # after we send our first packet.
@@ -129,6 +130,7 @@ class QuicEndpoint:
         self.socket.close()
         for stream in list(self.connections.values()):
             stream.close()
+        self.new_connections_q.r.close()  # alerts anyone waiting on receive(), e.g., the server or client handshake
 
     def __enter__(self) -> Self:
         return self
@@ -277,20 +279,16 @@ class SimpleQuicConnection(trio.abc.Stream):
         self.close()
         await trio.lowlevel.checkpoint()
 
-    async def do_handshake(self, *, initial_retransmit_timeout: float = 1.0) -> None:
+    async def do_handshake(self, hello_payload: bytes = None, *, initial_retransmit_timeout: float = 1.0) -> None:
         """Perform the handshake.
-
-        Calling this is optional – if you don't, then it will be automatically called
-        the first time you call `send_all()` or `receive_some()`.
-        But calling it explicitly can be useful in case you want to control the retransmit timeout,
-        use a cancel scope to place an overall timeout on the handshake, or catch errors from the handshake
-        specifically.
 
         It's safe to call this multiple times, or call it simultaneously from multiple
         tasks – the first call will perform the handshake, and the rest will be no-ops.
 
         Args:
 
+          hello_payload (bytes): if given and not None, then perform the server-side of
+            the handshake. Otherwise, initiate the handshake from the client-side.
           initial_retransmit_timeout (float): Since UDP is an unreliable protocol, it's
             possible that some of the packets we send during the handshake will get
             lost. To handle this, QUIC uses a timer to automatically retransmit
@@ -308,8 +306,20 @@ class SimpleQuicConnection(trio.abc.Stream):
         async with self._handshake_lock:
             if self._did_handshake:
                 return
-            self.endpoint._ensure_receive_loop()
-            # TODO: perform actual QUIC handshake (once implementing TLS etc.)
+            self.endpoint.ensure_receive_loop()
+
+            # TODO: perform actual QUIC handshake (implementing TLS 1.3 etc.)
+            if hello_payload is None:
+                # client-side of handshake
+                await self.send_all(b'ClientHello')
+                (payload, remote_address) = await self.endpoint.new_connections_q.r.receive()
+                assert payload == b'ServerHello'
+                self.remote_address = remote_address
+            else:
+                # server-side of handshake
+                assert hello_payload == b'ClientHello'
+                await self.send_all(b'ServerHello')
+
             self._did_handshake = True
 
     async def send_all(self, data: bytes | bytearray | memoryview) -> None:
@@ -340,8 +350,6 @@ class SimpleQuicConnection(trio.abc.Stream):
         if self._closed:
             raise trio.ClosedResourceError("connection was already closed")
         # TODO: if QUIC Streams are also HalfClosable then do more state checking here...?
-        if not self._did_handshake:
-            await self.do_handshake()
         await self.endpoint._send_to(data, self.remote_address)
 
     async def wait_send_all_might_not_block(self) -> None:
@@ -390,8 +398,6 @@ class SimpleQuicConnection(trio.abc.Stream):
     async def receive_some(self, max_bytes: int | None = None) -> bytes | None:
         if self._closed:
             raise trio.ClosedResourceError("connection was already closed")
-        if not self._did_handshake:
-            await self.do_handshake()
 
         if max_bytes is None:
             max_bytes = MAX_UDP_PACKET_SIZE
@@ -439,12 +445,7 @@ async def quic_receive_loop(
                     return
                 destination = endpoint.connections.get(address, None)
                 if destination is None:
-                    if isinstance(endpoint, QuicServer):
-                        server = cast(QuicServer, endpoint)
-                        await server.incoming_connections_q.s.send((udp_packet, address))
-                    else:
-                        # clients shouldn't get data from unknown sources: drop packet!
-                        return
+                    await endpoint.new_connections_q.s.send((udp_packet, address))
                 else:
                     await destination.q.s.send(udp_packet)
             finally:
@@ -463,20 +464,16 @@ async def quic_receive_loop(
 @final
 class QuicServer(QuicEndpoint):
 
-    def __init__(self, bound_socket: trio.socket.SocketType) -> None:
+    def __init__(self, bound_socket: trio.socket.SocketType, address: tuple[str | bytes | None, int]) -> None:
         QuicEndpoint.__init__(self, bound_socket)
         try:
             self.socket.getsockname()
         except OSError:
-            raise RuntimeError("UDP socket must be bound before it can serve") from None
+            raise RuntimeError("UDP socket must be operational bound before it can serve") from None
+        self.address = address
 
         # self._listening_context: SSL.Context | None = None
         # self._listening_key: bytes | None = None
-        self.incoming_connections_q = _Queue[tuple[bytes, tuple[str, int]]](float("inf"))
-
-    def close(self) -> None:
-        super().close()
-        self.incoming_connections_q.r.close()  # alerts anyone waiting on receive()
 
     async def serve(
         self,
@@ -509,7 +506,7 @@ class QuicServer(QuicEndpoint):
 
         """
         self._check_closed()
-        self._ensure_receive_loop()
+        self.ensure_receive_loop()
 
         try:
             task_status.started()
@@ -521,14 +518,17 @@ class QuicServer(QuicEndpoint):
             async with trio.open_nursery() as nursery:
                 if handler_nursery is None:
                     handler_nursery = nursery
-                async for (payload, remote_address) in self.incoming_connections_q.r:
+                async for (payload, remote_address) in self.new_connections_q.r:
                     new_connection = self.connections.get(remote_address, None)
                     if new_connection is None:
                         new_connection = SimpleQuicConnection(self,
                                                               remote_address,
                                                               configuration=QuicConfiguration(is_client=False))
+                        await new_connection.do_handshake(payload)
                         self.connections[remote_address] = new_connection
-                    await new_connection.q.s.send(payload)
+                    else:
+                        # TODO: should this actually happen?
+                        await new_connection.q.s.send(payload)
                     handler_nursery.start_soon(handler_wrapper, new_connection)
         finally:
             pass  # TODO: any other cleanup duties here?
@@ -582,23 +582,20 @@ class QuicServer(QuicEndpoint):
 @final
 class QuicClient(QuicEndpoint):
 
-    def connect(
+    async def connect(
         self,
-        remote_address: tuple[str | bytes, int],
+        target_address: AddressFormat,  # could be 2-tuple (IPv4) or 4-tuple (IPv6)
         client_configuration: Optional[QuicConfiguration] = None,
     ) -> SimpleQuicConnection:
-        """Initiate an outgoing QUIC connection.
-
-        Notice that this is a synchronous method. That's because it doesn't actually
-        initiate any I/O – it just sets up a `QuicConnection` object. The actual handshake
-        doesn't occur until you start using the `QuicConnection`. This gives you a chance
-        to do further configuration first, like setting MTU etc.
+        """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
+        is based on UDP, we cannot reliably resolve the remote address after receiving the 
+        first reply.
 
         If this endpoint already manages a (prior) connection to the same remote address,
         it will return the old connection after checking that it isn't closed.
 
         Args:
-          remote_address: The address to connect to. Usually a (host, port) tuple, like
+          target_address: The address to connect to. Usually a (host, port) tuple, like
             ``("127.0.0.1", 12345)``.
           client_configuration: The client configuration to use (or None for default values)
 
@@ -608,12 +605,13 @@ class QuicClient(QuicEndpoint):
         """
         self._check_closed()
 
-        connection = self.connections.get(remote_address, None)
+        connection = self.connections.get(target_address, None)
         if connection is not None:
             # TODO: should there be anything else done here when re-using an existing connection?
             assert connection.is_closed is False, "connect() should never return a closed connection"
             return connection
 
-        connection = SimpleQuicConnection(self, remote_address, configuration=client_configuration)
-        self.connections[remote_address] = connection
+        connection = SimpleQuicConnection(self, target_address, configuration=client_configuration)
+        await connection.do_handshake()
+        self.connections[connection.remote_address] = connection
         return connection

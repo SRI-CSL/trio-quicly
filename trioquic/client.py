@@ -31,25 +31,6 @@ def format_host_port(host: str | bytes, port: int) -> str:
     else:
         return f"{host}:{port}"
 
-def reorder_for_rfc_6555_section_5_4(  # type: ignore[misc]
-    targets: list[tuple[socket.AddressFamily, socket.SocketKind, int, str, Any]],
-) -> None:
-    # RFC 6555 section 5.4 says that if getaddrinfo returns multiple address
-    # families (e.g. IPv4 and IPv6), then you should make sure that your first
-    # and second attempts use different families:
-    #
-    #    https://tools.ietf.org/html/rfc6555#section-5.4
-    #
-    # This function post-processes the results from getaddrinfo, in-place, to
-    # satisfy this requirement.
-    for i in range(1, len(targets)):
-        if targets[i][0] != targets[0][0]:
-            # Found the first entry with a different address family; move it
-            # so that it becomes the second item on the list.
-            if i != 1:
-                targets.insert(1, targets.pop(i))
-            break
-
 async def open_quic_connection(
         host: str | bytes,
         port: int,
@@ -102,4 +83,4 @@ async def open_quic_connection(
     # client_socket.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 0)
 
     client = QuicClient(client_socket)
-    return client.connect(winning_address, client_configuration)
+    return await client.connect(winning_address, client_configuration)

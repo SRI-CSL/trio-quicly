@@ -36,7 +36,7 @@ async def echo_handler(server_stream: SimpleQuicConnection) -> None:
         print(f"echo {ident}: crashed: {exc!r}")
 
 async def main():
-    await serve_quic(echo_handler, PORT)
+    await serve_quic(echo_handler, PORT, host="::")
 
 # We could also just write 'trio.run(trio.serve_tcp, echo_server, PORT)', but real
 # programs almost always end up doing other stuff too and then we'd have to go
