@@ -3,6 +3,7 @@ import warnings
 from contextlib import contextmanager
 import errno
 import logging
+import socket as psocket  # Python socket
 import trio
 from types import TracebackType
 from typing import *
@@ -498,11 +499,12 @@ class QuicServer(QuicEndpoint):
                 # ... do other things here ...
 
         Args:
-          handler: The handler function that will be invoked for each new,
+          :param handler: The handler function that will be invoked for each new,
             incoming connection.
-          handler_nursery: The nursery to use for handling each connection;
+          :param handler_nursery: The nursery to use for handling each connection;
             create an internal one if None is given
           *args: Additional arguments to pass to the handler function.
+          :param task_status:
 
         """
         self._check_closed()
@@ -525,11 +527,12 @@ class QuicServer(QuicEndpoint):
                                                               remote_address,
                                                               configuration=QuicConfiguration(is_client=False))
                         await new_connection.do_handshake(payload)
-                        self.connections[remote_address] = new_connection
+                        assert new_connection.remote_address == remote_address  # TODO: is this true?
+                        self.connections[new_connection.remote_address] = new_connection
+                        handler_nursery.start_soon(handler_wrapper, new_connection)
                     else:
                         # TODO: should this actually happen?
                         await new_connection.q.s.send(payload)
-                    handler_nursery.start_soon(handler_wrapper, new_connection)
         finally:
             pass  # TODO: any other cleanup duties here?
 
@@ -588,15 +591,17 @@ class QuicClient(QuicEndpoint):
         client_configuration: Optional[QuicConfiguration] = None,
     ) -> SimpleQuicConnection:
         """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
-        is based on UDP, we cannot reliably resolve the remote address after receiving the 
-        first reply.
+        is based on UDP, we cannot reliably resolve the remote address until fter receiving
+        the first reply.
 
         If this endpoint already manages a (prior) connection to the same remote address,
         it will return the old connection after checking that it isn't closed.
 
         Args:
           target_address: The address to connect to. Usually a (host, port) tuple, like
-            ``("127.0.0.1", 12345)``.
+            ``("127.0.0.1", 12345)``.  Note that unlike IPv4, in IPv6 the wildcard address
+            does not resolve to localhost as a remote address.  Use the IPv6 wildcard address
+            "::" only for servers that bind to them to all interfaces on localhost.
           client_configuration: The client configuration to use (or None for default values)
 
         Returns:

@@ -40,7 +40,7 @@ async def receiver(client_stream):
 
 
 async def parent(num: int = 0):
-    host = "::1"  # "127.0.0.1" or "0.0.0.0"  # "::1" but never wildcard address "::"
+    host = "127.0.0.1"  # "127.0.0.1" or "0.0.0.0"  # "::1" but never wildcard address "::"
 
     client_conn = await open_quic_connection(host, PORT)
     print(f'Starting client {num}')

@@ -77,3 +77,15 @@ poetry env remove $(which python)
 # Reinstall from Poetry's cache
 poetry install
 ```
+
+Note, since Poetry v2.0.0, the `shell` command changed:
+```
+Since Poetry (2.0.0), the shell command is not installed by default. You can use,
+
+  - the new env activate command (recommended); or
+  - the shell plugin to install the shell command
+
+Documentation: https://python-poetry.org/docs/managing-environments/#activating-the-environment
+
+Note that the env activate command is not a direct replacement for shell command.
+```

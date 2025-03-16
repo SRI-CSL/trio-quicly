@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import socket as psocket
 import trio
 from typing import *
 import pytest
@@ -36,6 +37,12 @@ async def test_open_one_quic_server(ipv6: bool):
     server = servers[0]
     if ipv6:
         assert server.socket.getsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY) == 1, "only support IPv6"
+    # else:
+        # UDP datagrams MUST NOT be fragmented at the IP layer. In IPv4, the Don't Fragment (DF) bit MUST be set
+        # if possible, to prevent fragmentation on the path.
+        #df_status = server.socket.getsockopt(trio.socket.IPPROTO_IP, psocket.socket.IP_MTU_DISCOVER)
+        #print(df_status)  # Expected Output: 2 (which corresponds to IP_PMTUDISC_DO)
+        #assert server.socket.getsockopt(trio.socket.IPPROTO_IP, ) == 2, "DF bit set"
 
 async def test_wildcard_quic_server():
     servers = await open_quic_servers(0, host=None)
