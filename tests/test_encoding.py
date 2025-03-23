@@ -66,8 +66,8 @@ def test_quick_packets():
                                      spin_bit=False, key_phase=True,
                                      packet_number=packet_number, payload=bytes.fromhex("ee"))
     first_byte = one_rtt_pkt.encode_first_byte()
-    assert "01000111" == f"{first_byte:08b}"  # first bit == 0, second bit == 1, 3rd bit == spin_bit (0),
-                                              # 6th bit == key_phase (1), 7..8 bits encode 3 == len(encoded_pn)
+    assert "01000110" == f"{first_byte:08b}"  # first bit == 0, second bit == 1, 3rd bit == spin_bit (0),
+                                              # 6th bit == key_phase (1), 7..8 bits encode 2 == len(encoded_pn) - 1
     packet = one_rtt_pkt.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     assert len(packet) == 12  # 12 bytes
@@ -89,7 +89,7 @@ def test_quick_packets():
     initial_pkt = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
                                      packet_number=packet_number, payload=bytes.fromhex("dd"))
     first_byte = initial_pkt.encode_first_byte()
-    assert "11000011" == f"{first_byte:08b}"  # bits 3..4 = INITIAL,  bits 5..6 = 0 (reserved), bits 7..8 encode 3 == len(encoded_pn)
+    assert "11000010" == f"{first_byte:08b}"  # bits 3..4 = INITIAL,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
     packet = initial_pkt.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     check_long_header(packet, 24, sample_dcid, sample_scid)
@@ -102,7 +102,7 @@ def test_quick_packets():
     initial_pkt_w_tkn = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
                                            token=tkn, packet_number=packet_number, payload=bytes.fromhex("dd 65 20 02"))
     first_byte = initial_pkt_w_tkn.encode_first_byte()
-    assert "11000011" == f"{first_byte:08b}"  # bits 3..4 = INITIAL,  bits 5..6 = 0 (reserved), bits 7..8 encode 3 == len(encoded_pn)
+    assert "11000010" == f"{first_byte:08b}"  # bits 3..4 = INITIAL,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
     packet = initial_pkt_w_tkn.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     check_long_header(packet, 32, sample_dcid, sample_scid)
@@ -118,7 +118,7 @@ def test_quick_packets():
     zero_rtt_pkt = create_quic_packet(QuicPacketType.ZERO_RTT, sample_dcid, source_cid=sample_scid,
                                       packet_number=packet_number, payload=bytes.fromhex("cc bb"))
     first_byte = zero_rtt_pkt.encode_first_byte()
-    assert "11010011" == f"{first_byte:08b}"  # bits 3..4 = 0-RTT,  bits 5..6 = 0 (reserved), bits 7..8 encode 3 == len(encoded_pn)
+    assert "11010010" == f"{first_byte:08b}"  # bits 3..4 = 0-RTT,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
     packet = zero_rtt_pkt.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     check_long_header(packet, 24, sample_dcid, sample_scid)
@@ -130,7 +130,7 @@ def test_quick_packets():
     handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE, sample_dcid, source_cid=sample_scid,
                                        packet_number=packet_number, payload=bytes.fromhex("bb aa 55"))
     first_byte = handshake_pkt.encode_first_byte()
-    assert "11100011" == f"{first_byte:08b}"  # bits 3..4 = HANDSHAKE,  bits 5..6 = 0 (reserved), bits 7..8 encode 3 == len(encoded_pn)
+    assert "11100010" == f"{first_byte:08b}"  # bits 3..4 = HANDSHAKE,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
     packet = handshake_pkt.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     check_long_header(packet, 25, sample_dcid, sample_scid)

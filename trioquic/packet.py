@@ -135,7 +135,7 @@ class QuicPacket:
 
     destination_cid: bytes  # destination connection ID (0--20 Bytes)
 
-    packet_number_length: int = field(default=0, init=False)  # 2 bits = 0..3 values.
+    packet_number_length: int = field(default=1, init=False)  # 2 bits + 1 = 1..4 values.
     # To be derived post_init from packet_number!
     # Only present in `INITIAL`, `ZERO_RTT`, `HANDSHAKE`, and `ONE_RTT` packets.
 
@@ -203,8 +203,8 @@ class LongHeaderPacket(QuicPacket):
         )
         if self.packet_type != QuicPacketType.RETRY:
             assert self.reserved_bits.bit_length() <= 2
-            assert self.packet_number_length.bit_length() <= 2
-            return first_four_bits << 4 | (self.reserved_bits << 2) | self.packet_number_length
+            assert (self.packet_number_length - 1).bit_length() <= 2
+            return first_four_bits << 4 | (self.reserved_bits << 2) | (self.packet_number_length - 1)
         else:
             return first_four_bits << 4 | 0b0000  # bits 5..8 are unused for `RETRY` packets
 
@@ -290,14 +290,14 @@ class ShortHeaderPacket(QuicPacket):
 
     def encode_first_byte(self) -> int:
         assert self.reserved_bits.bit_length() <= 2
-        assert self.packet_number_length.bit_length() <= 2
+        assert (self.packet_number_length - 1).bit_length() <= 2
         return (
             (self.is_long_header << 7)  # first bit should be 0
             | (1 << 6)                  # second bit is FIXED BIT
             | (self.spin_bit << 5)
             | (self.reserved_bits << 3)
             | (self.key_phase << 2)
-            | self.packet_number_length
+            | (self.packet_number_length - 1)
         )
 
     def encode_all_bytes(self) -> bytes:

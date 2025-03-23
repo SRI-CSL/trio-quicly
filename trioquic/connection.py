@@ -10,7 +10,8 @@ from typing import *
 import weakref
 
 from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE
-from .packet import MAX_UDP_PACKET_SIZE
+from .packet import MAX_UDP_PACKET_SIZE, create_quic_packet, QuicPacketType
+
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
 logger = logging.getLogger("trioquic")
@@ -311,7 +312,14 @@ class SimpleQuicConnection(trio.abc.Stream):
 
             # TODO: perform actual QUIC handshake (implementing TLS 1.3 etc.)
             if hello_payload is None:
-                # client-side of handshake
+                # client-side of handshake: create initial packet
+                # dest_cid =
+                # source_cid =
+                # client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
+                #                                         dest_cid,
+                #                                         source_cid=source_cid,
+                #                                         packet_number=packet_number,
+                #                                         payload=bytes.fromhex("ff")) # TODO: TLS ClientHello etc.
                 await self.send_all(b'ClientHello')
                 (payload, remote_address) = await self.endpoint.new_connections_q.r.receive()
                 assert payload == b'ServerHello'
@@ -428,7 +436,7 @@ async def quic_receive_loop(
         while True:
             try:
                 udp_packet, address = await udp_socket.recvfrom(MAX_UDP_PACKET_SIZE)
-                print(f"recvfrom: {udp_packet!r} from {address}")
+                print(f"\nrecvfrom: {udp_packet!r} from {address}")
             except OSError as exc:
                 if exc.errno == errno.ECONNRESET:
                     # Windows only: "On a UDP-datagram socket [ECONNRESET]
@@ -591,7 +599,7 @@ class QuicClient(QuicEndpoint):
         client_configuration: Optional[QuicConfiguration] = None,
     ) -> SimpleQuicConnection:
         """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
-        is based on UDP, we cannot reliably resolve the remote address until fter receiving
+        is based on UDP, we cannot reliably resolve the remote address until after receiving
         the first reply.
 
         If this endpoint already manages a (prior) connection to the same remote address,
