@@ -5,6 +5,9 @@ from enum import Enum, IntEnum, IntFlag
 from importlib.metadata import requires
 from typing import *
 
+from trioquic.crypto import decode_var_length_int
+from trioquic.exceptions import QuicProtocolViolation
+
 MAX_UDP_PACKET_SIZE = 65527
 
 # QUIC Packet
@@ -44,6 +47,11 @@ def encode_var_length_int(value: int) -> bytes:
     else:  # 8-byte encoding: 11...
         value |= 0b11 << 62
         return value.to_bytes(8, "big")
+
+def get_connection_id(data: bytes) -> tuple[bytes, int]:
+    cid_length = int.from_bytes(data[0:1], "big") # first byte has length information
+    cid_bytes = data[1:cid_length+1]
+    return cid_bytes, cid_length + 1
 
 class QuicProtocolVersion(IntEnum):
     NEGOTIATION = 0
@@ -157,11 +165,15 @@ class QuicPacket:
         # The struct module provides a way to convert data to/from C structs (or network data).
         raise NotImplementedError()
 
+    @classmethod
+    def decode_all_bytes(cls, data: bytes) -> "QuicPacket":
+        raise NotImplementedError()
+
     def __post_init__(self):
         # derive values and sanity checks
         if self.packet_number is not None:
-            # TODO: research whether packet numbers also use var int encoding!
-            self.packet_number_length = math.ceil(self.packet_number.bit_length() / 8)
+            # packet number is at least 1 byte long:
+            self.packet_number_length = max(math.ceil(self.packet_number.bit_length() / 8), 1)
             assert 1 <= self.packet_number_length <= 4
         assert self.reserved_bits.bit_length() <= 2
 
@@ -248,6 +260,48 @@ class LongHeaderPacket(QuicPacket):
                 + self.integrity_tag
         raise RuntimeError(f"Cannot encode packet type: {self.packet_type}")
 
+    @classmethod
+    def decode_all_bytes(cls, data: bytes) -> "LongHeaderPacket":
+        pkt_type_n = (data[0] & 0b00110000) >> 4  # Bits 3–4
+
+        if pkt_type_n > 3:
+            raise ValueError(f"Packet type number {pkt_type_n} is not valid")
+        packet_type = QuicPacketType(pkt_type_n)
+
+        assert int.from_bytes(data[1:5]) == QuicProtocolVersion.VERSION_1
+        dst_cid, offset = get_connection_id(data[5:])
+        offset += 5
+        src_cid, offset1 = get_connection_id(data[offset:])
+        offset += offset1
+
+        if packet_type == QuicPacketType.RETRY:
+            return LongHeaderPacket(packet_type=packet_type,
+                                    destination_cid=dst_cid, source_cid=src_cid,
+                                    token=data[offset:-16], integrity_tag=data[-16:])
+
+        assert packet_type in {QuicPacketType.INITIAL, QuicPacketType.ZERO_RTT, QuicPacketType.HANDSHAKE}
+        # parse lower 4-bits of first byte:
+        reserved_bits = (data[0] & 0b00001100) >> 2  # Bits 5-6
+        if not reserved_bits == 0:
+            raise QuicProtocolViolation(f"{packet_type} must have 0b00 for reserved bits in long header")
+        packet_number_length = (data[0] & 0b00000011) + 1  # Bits 7-8 but add 1 to map to values 1..4
+
+        token = None
+        if packet_type == QuicPacketType.INITIAL:
+            token_length, offset1 = decode_var_length_int(data[offset:])
+            offset += offset1
+            if token_length > 0:
+                token = data[offset:offset+token_length]
+                offset += token_length
+        # all 3 remaining packet types now have length (i), packet number, and packet payload left from offset on:
+        length, offset1 = decode_var_length_int(data[offset:])
+        offset += offset1
+        return LongHeaderPacket(packet_type=packet_type,
+                                destination_cid=dst_cid, source_cid=src_cid,
+                                token=token,
+                                packet_number=int.from_bytes(data[offset:offset+packet_number_length]),
+                                payload=data[offset+packet_number_length:offset+length]) # length includes packet number length and payload
+
 @dataclass
 class VersionNegotiationPacket(LongHeaderPacket):
 
@@ -271,6 +325,25 @@ class VersionNegotiationPacket(LongHeaderPacket):
             len(self.source_cid),
             self.source_cid,
             *self.supported_versions
+        )
+
+    @classmethod
+    def decode_all_bytes(cls, data: bytes) -> "VersionNegotiationPacket":
+        if len(data) < 11:
+            raise ValueError("Version Negotiation packet too short, must have at least 11 bytes")
+        first_byte_has_msb_set = (data[0] & 0b10000000) != 0
+        last_4_bytes_are_zero = data[1:5] == b'\x00\x00\x00\x00'
+        if not (first_byte_has_msb_set and last_4_bytes_are_zero):
+            raise ValueError("Version Negotiation does not match expected format for first 5 bytes")
+
+        dst_cid, offset = get_connection_id(data[5:])
+        offset += 5
+        src_cid, offset1 = get_connection_id(data[offset:])
+        offset += offset1
+        return VersionNegotiationPacket(
+            dst_cid,
+            source_cid=src_cid,
+            supported_versions=[int.from_bytes(data[i:i+4], 'big') for i in range(offset, len(data) - 3, 4)]
         )
 
 @dataclass
@@ -307,6 +380,35 @@ class ShortHeaderPacket(QuicPacket):
                                     self.packet_number.to_bytes(self.packet_number_length))
         return packed_header + self.payload
 
+    @classmethod
+    def decode_all_bytes(cls, data: bytes, **kwargs) -> "ShortHeaderPacket":
+        if len(data) < 3:
+            raise ValueError("1-RTT packet too short, must have at least 3 bytes")
+
+        first_two_bits_set = (data[0] & 0b11000000) == 0b01000000
+        if not first_two_bits_set:
+            raise ValueError("1-RTT packet does not match expected format for first 2 bits")
+
+        spin_bit = bool((data[0] & 0b00100000) >> 5)  # Bit 3 (from MSB)
+        reserved_bits = (data[0] & 0b00011000) >> 3  # Bits 4-5
+        key_phase = bool((data[0] & 0b00000100) >> 2)  # Bit 6
+        packet_number_length = (data[0] & 0b00000011) + 1  # Bits 7-8 but add 1 to map to values 1..4
+
+        if not reserved_bits == 0:
+            raise QuicProtocolViolation("1-RTT packet must have 0b00 for reserved bits in short header")
+
+        dest_cid = kwargs.pop('destination_cid', None)
+        if dest_cid is None:
+            raise ValueError("1-RTT packet required 'destination_cid' argument with destination connection ID")
+        if not isinstance(dest_cid, bytes):
+            raise TypeError(f"'destination_cid' must be of type bytes, got {type(dest_cid).__name__}")
+
+        offset = 1 + len(dest_cid)
+        return ShortHeaderPacket(destination_cid=dest_cid,
+                                 spin_bit=spin_bit, key_phase=key_phase,
+                                 packet_number=int.from_bytes(data[offset:offset + packet_number_length]),
+                                 payload=data[offset + packet_number_length:])
+
 def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kwargs) -> QuicPacket:
     if packet_type == QuicPacketType.ONE_RTT:
         required_keys = {"spin_bit", "key_phase", "packet_number", "payload"}
@@ -317,8 +419,17 @@ def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kw
         raise ValueError(f"Missing required keyword argument 'source_cid' for {packet_type}")
     elif packet_type == QuicPacketType.VERSION_NEGOTIATION:
         return VersionNegotiationPacket(destination_cid=destination_cid, **kwargs)
-    # TODO: slice kwargs to include: packet_number, etc...
-    # required_keys = {"supported_versions"}
-    # if not required_keys.issubset(kwargs):
-    #     raise ValueError(f"Missing required keyword arguments for {packet_type}: {required_keys - kwargs.keys()}")
     return LongHeaderPacket(packet_type=packet_type, destination_cid=destination_cid, **kwargs)
+
+def decode_quic_packet(byte_stream: bytes, destination_cid: bytes = None) -> QuicPacket:
+    assert len(byte_stream) >= 3
+    # long or short header?
+    if (byte_stream[0] & 0b10000000) != 0:
+        # long header:
+        assert len(byte_stream) >= 7
+        if int.from_bytes(byte_stream[1:5], byteorder="big") == 0:  # version negotiation:
+            return VersionNegotiationPacket.decode_all_bytes(byte_stream)
+        return LongHeaderPacket.decode_all_bytes(byte_stream)
+    else:
+        # short header:
+        return ShortHeaderPacket.decode_all_bytes(byte_stream, destination_cid=destination_cid)

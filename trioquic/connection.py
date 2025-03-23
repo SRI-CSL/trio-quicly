@@ -1,4 +1,5 @@
 import contextlib
+import secrets
 import warnings
 from contextlib import contextmanager
 import errno
@@ -10,7 +11,7 @@ from typing import *
 import weakref
 
 from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE
-from .packet import MAX_UDP_PACKET_SIZE, create_quic_packet, QuicPacketType
+from .packet import MAX_UDP_PACKET_SIZE, create_quic_packet, QuicPacketType, decode_quic_packet, LongHeaderPacket
 
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
@@ -313,21 +314,43 @@ class SimpleQuicConnection(trio.abc.Stream):
             # TODO: perform actual QUIC handshake (implementing TLS 1.3 etc.)
             if hello_payload is None:
                 # client-side of handshake: create initial packet
-                # dest_cid =
-                # source_cid =
-                # client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
-                #                                         dest_cid,
-                #                                         source_cid=source_cid,
-                #                                         packet_number=packet_number,
-                #                                         payload=bytes.fromhex("ff")) # TODO: TLS ClientHello etc.
-                await self.send_all(b'ClientHello')
+                # The client has not yet received a connection ID chosen by the server. Instead, it uses this field to
+                # provide the 8 bytes of random data for deriving Initial encryption keys.
+                initial_random = secrets.token_bytes(8)
+                source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be randomly chosen 5 bytes
+                client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
+                                                        destination_cid=initial_random,
+                                                        source_cid=source_cid,
+                                                        packet_number=0,
+                                                        payload=bytes.fromhex("ff")) # TODO: TLS ClientHello etc. payload
+                # TODO: Any datagram sent by the client that contains an Initial packet must be padded to a length of
+                #  1200 bytes. This library does it by appending nul bytes to the datagram.
+                await self.send_all(client_initial_pkt.encode_all_bytes())
                 (payload, remote_address) = await self.endpoint.new_connections_q.r.receive()
-                assert payload == b'ServerHello'
                 self.remote_address = remote_address
+
+                server_initial_pkt = decode_quic_packet(payload)
+                assert isinstance(server_initial_pkt, LongHeaderPacket)
+                assert server_initial_pkt.payload == QuicPacketType.INITIAL
+
+                # TODO: wait also for handshake packet?  Could it arrive before the INITIAL one??
+
             else:
                 # server-side of handshake
-                assert hello_payload == b'ClientHello'
-                await self.send_all(b'ServerHello')
+                # parse hello_payload as client initial packet:
+                client_initial_pkt = decode_quic_packet(hello_payload)
+                assert isinstance(client_initial_pkt, LongHeaderPacket)
+                assert client_initial_pkt.packet_type == QuicPacketType.INITIAL
+
+                source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be randomly chosen 5 bytes
+                server_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
+                                                        destination_cid=client_initial_pkt.source_cid,  # repeated back
+                                                        source_cid=source_cid,
+                                                        packet_number=0,
+                                                        payload=bytes.fromhex("ee")) # TODO: TLS ClientHello etc. payload
+                await self.send_all(server_initial_pkt.encode_all_bytes())
+                # TODO: The server follows up with a "Handshake" packet. This packet contains TLS 1.3 handshake
+                #  records from the server.
 
             self._did_handshake = True
 

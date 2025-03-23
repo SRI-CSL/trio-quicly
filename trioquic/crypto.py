@@ -31,7 +31,7 @@ def decode_var_length_int(data: bytes) -> tuple[int, int]:
     See: Appendix A - Sample Variable-Length Integer Decoding
 
     :param data: single byte of data to be decoded
-    :return: pair of decoded integer and length of bytes used for decoding (offset into original data)
+    :return: a pair of decoded integer and length of bytes used for decoding (offset into original data)
     """
     # The length of variable-length integers is encoded in the first two bits of the first byte.
     v = data[0]

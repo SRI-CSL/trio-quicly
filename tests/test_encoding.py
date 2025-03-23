@@ -1,10 +1,16 @@
+import math
 import secrets
 
 import pytest
 
 from trioquic.crypto import decode_var_length_int, encode_packet_number, decode_packet_number
 from trioquic.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
-    encode_var_length_int
+    encode_var_length_int, VersionNegotiationPacket, ShortHeaderPacket, QuicPacket, decode_quic_packet, LongHeaderPacket
+
+sample_dcid = bytes.fromhex("c2 19 7c 5e ff 14 e8")  # 7 Bytes long
+sample_scid = bytes.fromhex("ff 14 e8 8c")  # 4 Bytes long
+packet_number = 0xac5c02
+encoded_pn = encode_packet_number(packet_number)
 
 
 # For example, the eight-byte sequence 0xc2197c5eff14e88c decodes to the decimal value 151,288,809,941,952,652;
@@ -30,8 +36,6 @@ def test_var_int_encoding():
     with pytest.raises(ValueError):
         encode_var_length_int(2 ** 63)
 
-
-
 # For example, if an endpoint has received an acknowledgment for packet 0xabe8b3 and is sending a packet with a number
 # of 0xac5c02, there are 29,519 (0x734f) outstanding packet numbers. In order to represent at least twice this range
 # (59,038 packets, or 0xe69e), 16 bits are required. In the same state, sending a packet with a number of 0xace8fe uses
@@ -55,13 +59,34 @@ def check_long_header(packet: bytes, expected_length: int, expected_dcid: bytes,
     assert expected_dcid == packet[6:13]
     assert expected_scid == packet[14:18]
 
-def test_quick_packets():
-    sample_dcid = bytes.fromhex("c2 19 7c 5e ff 14 e8")  # 7 Bytes long
-    sample_scid = bytes.fromhex("ff 14 e8 8c")  # 4 Bytes long
-    packet_number = 0xac5c02
-    encoded_pn = encode_packet_number(packet_number)
-    assert packet_number.bit_length() / 8 == len(encoded_pn)
+def test_ver_neg_pkt():
+    silly_version = int.from_bytes(bytes.fromhex("aa bb cc dd"))
+    ver_neg_pkt = create_quic_packet(QuicPacketType.VERSION_NEGOTIATION, sample_dcid,
+                                     source_cid=sample_scid,
+                                     supported_versions=[QuicProtocolVersion.VERSION_1,
+                                                         silly_version])
+    first_byte = ver_neg_pkt.encode_first_byte()
+    assert "10000000" == f"{first_byte:08b}"  # first bit == 1
+    packet = ver_neg_pkt.encode_all_bytes()
+    # print(f"\n{packet.hex(' ')}")
+    assert len(packet) == 26
+    assert QuicProtocolVersion.NEGOTIATION == int.from_bytes(packet[1:5])
+    assert sample_dcid == packet[6:13]
+    assert sample_scid == packet[14:18]
+    assert QuicProtocolVersion.VERSION_1 == int.from_bytes(packet[18:22])
 
+    decoded_pkt = VersionNegotiationPacket.decode_all_bytes(packet)
+    assert len(decoded_pkt.supported_versions) == 2
+    assert QuicProtocolVersion.VERSION_1 == decoded_pkt.supported_versions[0]
+    assert silly_version == decoded_pkt.supported_versions[1]
+
+    # adding 2 extra bytes at end that should be safely ignored:
+    decoded_pkt = decode_quic_packet(
+        bytes.fromhex("80 00 00 00 00 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 00 00 00 01 aa bb cc dd ff ee"))
+    assert isinstance(decoded_pkt, VersionNegotiationPacket)
+    assert len(decoded_pkt.supported_versions) == 2
+
+def test_short_header():
     one_rtt_pkt = create_quic_packet(QuicPacketType.ONE_RTT, sample_dcid,
                                      spin_bit=False, key_phase=True,
                                      packet_number=packet_number, payload=bytes.fromhex("ee"))
@@ -71,20 +96,18 @@ def test_quick_packets():
     packet = one_rtt_pkt.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     assert len(packet) == 12  # 12 bytes
-    assert sample_dcid == packet[1:8]  # 2nd..8th byte is destination connection ID
-    assert packet_number == int.from_bytes(packet[8:8+len(encoded_pn)])  # 9th..11th byte is packet number
+    assert sample_dcid == packet[1:8]  # 2..8 bytes are destination connection ID
+    assert packet_number == int.from_bytes(packet[8:8+len(encoded_pn)])  # 9..11 bytes are packet number
 
-    ver_neg_pkt = create_quic_packet(QuicPacketType.VERSION_NEGOTIATION, sample_dcid,
-                                     source_cid=sample_scid, supported_versions=[QuicProtocolVersion.VERSION_1])
-    first_byte = ver_neg_pkt.encode_first_byte()
-    assert "10000000" == f"{first_byte:08b}"  # first bit == 1
-    packet = ver_neg_pkt.encode_all_bytes()
-    # print(f"\n{packet.hex(' ')}")
-    assert len(packet) == 22  # 20 bytes
-    assert QuicProtocolVersion.NEGOTIATION == int.from_bytes(packet[1:5])
-    assert sample_dcid == packet[6:13]
-    assert sample_scid == packet[14:18]
-    assert QuicProtocolVersion.VERSION_1 == int.from_bytes(packet[18:22])
+    decoded_pkt = ShortHeaderPacket.decode_all_bytes(packet, destination_cid=sample_dcid)
+    assert decoded_pkt.destination_cid == sample_dcid
+    assert decoded_pkt.packet_number == packet_number
+
+    decoded_pkt = decode_quic_packet(bytes.fromhex("46 c2 19 7c 5e ff 14 e8 ac 5c 02 ee"), destination_cid=sample_dcid)
+    assert isinstance(decoded_pkt, ShortHeaderPacket)
+
+def test_initial_packets():
+    assert max(math.ceil(packet_number.bit_length() / 8), 1) == len(encoded_pn)
 
     initial_pkt = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
                                      packet_number=packet_number, payload=bytes.fromhex("dd"))
@@ -115,6 +138,20 @@ def test_quick_packets():
     assert packet_number == int.from_bytes(packet[24+start:24+start+len(encoded_pn)])
     assert bytes.fromhex("dd 65 20 02") == packet[24+start+len(encoded_pn):]
 
+    decoded_pkt = decode_quic_packet(
+        bytes.fromhex("c2 00 00 00 01 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 dd 65 20 02"))
+    assert isinstance(decoded_pkt, LongHeaderPacket)
+    assert decoded_pkt.is_long_header
+    assert decoded_pkt.packet_type == QuicPacketType.INITIAL
+    assert decoded_pkt.destination_cid == sample_dcid
+    assert decoded_pkt.source_cid == sample_scid
+    assert decoded_pkt.token == tkn
+    assert decoded_pkt.packet_number == packet_number
+    assert decoded_pkt.packet_number_length == len(encoded_pn)
+    assert decoded_pkt.payload == bytes.fromhex("dd 65 20 02")
+
+def test_quic_packets():
+
     zero_rtt_pkt = create_quic_packet(QuicPacketType.ZERO_RTT, sample_dcid, source_cid=sample_scid,
                                       packet_number=packet_number, payload=bytes.fromhex("cc bb"))
     first_byte = zero_rtt_pkt.encode_first_byte()
@@ -130,7 +167,7 @@ def test_quick_packets():
     handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE, sample_dcid, source_cid=sample_scid,
                                        packet_number=packet_number, payload=bytes.fromhex("bb aa 55"))
     first_byte = handshake_pkt.encode_first_byte()
-    assert "11100010" == f"{first_byte:08b}"  # bits 3..4 = HANDSHAKE,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
+    assert "11100010" == f"{first_byte:08b}"  # bits 3-4 = HANDSHAKE,  bits 5-6 = 0 (reserved), bits 7-8 encode 2 == len(encoded_pn) - 1
     packet = handshake_pkt.encode_all_bytes()
     # print(f"\n{packet.hex(' ')}")
     check_long_header(packet, 25, sample_dcid, sample_scid)
@@ -139,13 +176,36 @@ def test_quick_packets():
     assert packet_number == int.from_bytes(packet[18+start:18+start+len(encoded_pn)])
     assert bytes.fromhex("bb aa 55") == packet[18+start+len(encoded_pn):]
 
+    decoded_pkt = decode_quic_packet(packet)
+    assert isinstance(decoded_pkt, LongHeaderPacket)
+    assert decoded_pkt.packet_type == QuicPacketType.HANDSHAKE
+    assert decoded_pkt.version == QuicProtocolVersion.VERSION_1
+    assert decoded_pkt.destination_cid == sample_dcid
+    assert decoded_pkt.source_cid == sample_scid
+    assert decoded_pkt.packet_number == packet_number
+    assert decoded_pkt.packet_number_length == len(encoded_pn)
+    assert decoded_pkt.payload == bytes.fromhex("bb aa 55")
+
+def test_retry_packets():
+
     tkn = bytes.fromhex("c5 00 7f ff 25")
+    integrity_tag = secrets.token_bytes(16)
     retry_pkt = create_quic_packet(QuicPacketType.RETRY, sample_dcid, source_cid=sample_scid,
                                    token=tkn,
-                                   integrity_tag=secrets.token_bytes(16))
+                                   integrity_tag=integrity_tag)
     first_byte = retry_pkt.encode_first_byte()
-    assert "11110000" == f"{first_byte:08b}"  # bits 3..4 = RETRY, bits 5..8 unused
+    assert "11110000" == f"{first_byte:08b}"  # bits 3-4 = RETRY, bits 5-8 unused
     packet = retry_pkt.encode_all_bytes()
-    # print(f"\n{packet.hex(' ')}")
+    # print(f"\npacket = {packet.hex(' ')}")
     check_long_header(packet, 18+len(tkn)+16, sample_dcid, sample_scid)
-    # TODO: retry token and integrity tag
+    assert tkn == packet[18:18+len(tkn)]
+    assert integrity_tag == packet[-16:]
+
+    decoded_pkt = decode_quic_packet(packet)
+    assert isinstance(decoded_pkt, LongHeaderPacket)
+    assert decoded_pkt.packet_type == QuicPacketType.RETRY
+    assert decoded_pkt.version == QuicProtocolVersion.VERSION_1
+    assert decoded_pkt.destination_cid == sample_dcid
+    assert decoded_pkt.source_cid == sample_scid
+    assert decoded_pkt.token == tkn
+    assert decoded_pkt.integrity_tag == integrity_tag
