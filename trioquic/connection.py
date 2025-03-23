@@ -331,7 +331,7 @@ class SimpleQuicConnection(trio.abc.Stream):
 
                 server_initial_pkt = decode_quic_packet(payload)
                 assert isinstance(server_initial_pkt, LongHeaderPacket)
-                assert server_initial_pkt.payload == QuicPacketType.INITIAL
+                assert server_initial_pkt.packet_type == QuicPacketType.INITIAL
 
                 # TODO: wait also for handshake packet?  Could it arrive before the INITIAL one??
 
