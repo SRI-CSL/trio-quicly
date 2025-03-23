@@ -2,10 +2,10 @@ import math
 from enum import IntEnum
 from typing import *
 
-from .packet import (
-    QuicProtocolVersion,
-    is_long_header,
-)
+# from .packet import (
+#     QuicProtocolVersion,
+#     is_long_header,
+# )
 
 class CipherSuite(IntEnum):
     AES_128_GCM_SHA256 = 0x1301
