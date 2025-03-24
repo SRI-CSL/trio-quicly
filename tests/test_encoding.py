@@ -138,8 +138,9 @@ def test_initial_packets():
     assert packet_number == int.from_bytes(packet[24+start:24+start+len(encoded_pn)])
     assert bytes.fromhex("dd 65 20 02") == packet[24+start+len(encoded_pn):]
 
+    # adding some padding of NUL bytes at the end
     decoded_pkt = decode_quic_packet(
-        bytes.fromhex("c2 00 00 00 01 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 dd 65 20 02"))
+        bytes.fromhex("c2 00 00 00 01 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 dd 65 20 02 00 00 00"))
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.is_long_header
     assert decoded_pkt.packet_type == QuicPacketType.INITIAL

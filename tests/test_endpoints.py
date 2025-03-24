@@ -104,7 +104,7 @@ async def test_smoke(ipv6: bool) -> None:
 
 # @parametrize_ipv6
 async def test_handshake(ipv6: bool = False) -> None:
-    async with (quic_echo_server(True, ipv6=ipv6) as (_server_endpoint, address)):
+    async with (quic_echo_server(True, ipv6=ipv6, delay=0) as (_server_endpoint, address)):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
             await client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
