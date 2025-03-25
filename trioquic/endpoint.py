@@ -8,7 +8,7 @@ import warnings
 import weakref
 
 from .configuration import QuicConfiguration
-from .connection_new import SimpleQuicConnection
+from .connection import SimpleQuicConnection
 from .exceptions import QuicProtocolError
 from .packet import MAX_UDP_PACKET_SIZE
 from .utils import _Queue, AddressFormat, PosArgsT
@@ -83,14 +83,13 @@ class QuicEndpoint:
 
         self._send_lock = trio.Lock()
         self._closed = False
-        self._receive_loop_spawned = False
-        self._send_loop_spawned = False
+        self._loops_spawned = False
 
-    def _ensure_receive_loop(self) -> None:
+    def _ensure_receive_and_send_loops(self) -> None:
         # We have to spawn this lazily, because on Windows it will immediately error out
         # if the socket isn't already bound -- which for clients might not happen until
         # after we send our first packet.
-        if not self._receive_loop_spawned:
+        if not self._loops_spawned:
             trio.lowlevel.spawn_system_task(
                 quic_receive_loop,
                 weakref.ref(self),
@@ -101,7 +100,7 @@ class QuicEndpoint:
                 weakref.ref(self),
                 self.socket,
             )
-            self._receive_loop_spawned = True
+            self._loops_spawned = True
 
     def __del__(self) -> None:
         # Do nothing if this object was never fully constructed
@@ -298,7 +297,7 @@ class QuicServer(QuicEndpoint):
 
         """
         self._check_closed()
-        self._ensure_receive_loop()
+        self._ensure_receive_and_send_loops()
 
         try:
             task_status.started()
@@ -403,7 +402,7 @@ class QuicClient(QuicEndpoint):
 
         """
         self._check_closed()
-        self._ensure_receive_loop()
+        self._ensure_receive_and_send_loops()
 
         connection = self.connections.get(target_address, None)
         if connection is not None:

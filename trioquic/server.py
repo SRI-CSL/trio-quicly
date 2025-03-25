@@ -3,7 +3,7 @@ import trio
 from typing import *
 
 from .configuration import QuicConfiguration
-from .connection_new import SimpleQuicConnection
+from .connection import SimpleQuicConnection
 from .endpoint import QuicServer, PosArgsT
 
 StreamT = TypeVar("StreamT", bound=trio.abc.AsyncResource)

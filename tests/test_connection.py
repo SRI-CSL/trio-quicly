@@ -1,7 +1,7 @@
 import pytest
 
 from trioquic.configuration import QuicConfiguration
-from trioquic.connection_new import SimpleQuicConnection
+from trioquic.connection import SimpleQuicConnection
 
 
 # def test_wrong_client_conf1():

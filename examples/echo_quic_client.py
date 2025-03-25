@@ -4,7 +4,7 @@ import random
 import trio
 
 from trioquic.client import open_quic_connection
-from trioquic.connection_new import SimpleQuicConnection
+from trioquic.connection import SimpleQuicConnection
 
 if sys.version_info < (3, 11):
     pass

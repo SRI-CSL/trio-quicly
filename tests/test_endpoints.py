@@ -5,7 +5,7 @@ import pytest
 
 from trioquic.configuration import QuicConfiguration
 from trioquic.endpoint import QuicServer, QuicClient, QuicEndpoint
-from trioquic.connection_new import SimpleQuicConnection
+from trioquic.connection import SimpleQuicConnection
 from trioquic.server import open_quic_servers
 from .tutils import binds_ipv6
 
