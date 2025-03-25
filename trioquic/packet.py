@@ -166,7 +166,7 @@ class QuicPacket:
         raise NotImplementedError()
 
     @classmethod
-    def decode_all_bytes(cls, data: bytes) -> "QuicPacket":
+    def decode_all_bytes(cls, data: bytes) -> tuple["QuicPacket", int]:
         raise NotImplementedError()
 
     def __post_init__(self):
@@ -261,7 +261,7 @@ class LongHeaderPacket(QuicPacket):
         raise RuntimeError(f"Cannot encode packet type: {self.packet_type}")
 
     @classmethod
-    def decode_all_bytes(cls, data: bytes) -> "LongHeaderPacket":
+    def decode_all_bytes(cls, data: bytes) -> tuple["LongHeaderPacket", int]:
         pkt_type_n = (data[0] & 0b00110000) >> 4  # Bits 3–4
 
         if pkt_type_n > 3:
@@ -275,9 +275,10 @@ class LongHeaderPacket(QuicPacket):
         offset += offset1
 
         if packet_type == QuicPacketType.RETRY:
+            # RETRY packets are always at the end of UDP payload:
             return LongHeaderPacket(packet_type=packet_type,
                                     destination_cid=dst_cid, source_cid=src_cid,
-                                    token=data[offset:-16], integrity_tag=data[-16:])
+                                    token=data[offset:-16], integrity_tag=data[-16:]), len(data)
 
         assert packet_type in {QuicPacketType.INITIAL, QuicPacketType.ZERO_RTT, QuicPacketType.HANDSHAKE}
         # parse lower 4-bits of first byte:
@@ -300,7 +301,7 @@ class LongHeaderPacket(QuicPacket):
                                 destination_cid=dst_cid, source_cid=src_cid,
                                 token=token,
                                 packet_number=int.from_bytes(data[offset:offset+packet_number_length]),
-                                payload=data[offset+packet_number_length:offset+length]) # length includes packet number length and payload
+                                payload=data[offset+packet_number_length:offset+length]), offset + length # length includes packet number length and payload
 
 @dataclass
 class VersionNegotiationPacket(LongHeaderPacket):
@@ -328,7 +329,7 @@ class VersionNegotiationPacket(LongHeaderPacket):
         )
 
     @classmethod
-    def decode_all_bytes(cls, data: bytes) -> "VersionNegotiationPacket":
+    def decode_all_bytes(cls, data: bytes) -> tuple["VersionNegotiationPacket", int]:
         if len(data) < 11:
             raise ValueError("Version Negotiation packet too short, must have at least 11 bytes")
         first_byte_has_msb_set = (data[0] & 0b10000000) != 0
@@ -340,11 +341,12 @@ class VersionNegotiationPacket(LongHeaderPacket):
         offset += 5
         src_cid, offset1 = get_connection_id(data[offset:])
         offset += offset1
+        supported_versions = [int.from_bytes(data[i:i + 4], 'big') for i in range(offset, len(data) - 3, 4)]
         return VersionNegotiationPacket(
             dst_cid,
             source_cid=src_cid,
-            supported_versions=[int.from_bytes(data[i:i+4], 'big') for i in range(offset, len(data) - 3, 4)]
-        )
+            supported_versions=supported_versions
+        ), offset + len(supported_versions)*4
 
 @dataclass
 class ShortHeaderPacket(QuicPacket):
@@ -381,7 +383,7 @@ class ShortHeaderPacket(QuicPacket):
         return packed_header + self.payload
 
     @classmethod
-    def decode_all_bytes(cls, data: bytes, **kwargs) -> "ShortHeaderPacket":
+    def decode_all_bytes(cls, data: bytes, **kwargs) -> tuple["ShortHeaderPacket", int]:
         if len(data) < 3:
             raise ValueError("1-RTT packet too short, must have at least 3 bytes")
 
@@ -404,12 +406,16 @@ class ShortHeaderPacket(QuicPacket):
             raise TypeError(f"'destination_cid' must be of type bytes, got {type(dest_cid).__name__}")
 
         offset = 1 + len(dest_cid)
+        # TODO: maybe the length of a 1-RTT packet can be deduced from the decryption/removing protection later?
         return ShortHeaderPacket(destination_cid=dest_cid,
                                  spin_bit=spin_bit, key_phase=key_phase,
                                  packet_number=int.from_bytes(data[offset:offset + packet_number_length]),
-                                 payload=data[offset + packet_number_length:])
+                                 payload=data[offset + packet_number_length:]), len(data)
 
 def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kwargs) -> QuicPacket:
+    assert packet_type is not None
+    assert destination_cid is not None
+
     if packet_type == QuicPacketType.ONE_RTT:
         required_keys = {"spin_bit", "key_phase", "packet_number", "payload"}
         if not required_keys.issubset(kwargs):
@@ -421,15 +427,39 @@ def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kw
         return VersionNegotiationPacket(destination_cid=destination_cid, **kwargs)
     return LongHeaderPacket(packet_type=packet_type, destination_cid=destination_cid, **kwargs)
 
-def decode_quic_packet(byte_stream: bytes, destination_cid: bytes = None) -> QuicPacket:
-    assert len(byte_stream) >= 3
-    # long or short header?
-    if (byte_stream[0] & 0b10000000) != 0:
-        # long header:
-        assert len(byte_stream) >= 7
-        if int.from_bytes(byte_stream[1:5], byteorder="big") == 0:  # version negotiation:
-            return VersionNegotiationPacket.decode_all_bytes(byte_stream)
-        return LongHeaderPacket.decode_all_bytes(byte_stream)
-    else:
-        # short header:
-        return ShortHeaderPacket.decode_all_bytes(byte_stream, destination_cid=destination_cid)
+def decode_quic_packet(byte_stream: bytes, destination_cid: bytes = None) -> tuple[Optional[QuicPacket], int]:
+    if not len(byte_stream):
+        return None, 0
+    try:
+        if (byte_stream[0] & 0b10000000) != 0:  # Long header
+            if int.from_bytes(byte_stream[1:5]) == 0:
+                return VersionNegotiationPacket.decode_all_bytes(byte_stream)
+            else:
+                return LongHeaderPacket.decode_all_bytes(byte_stream)
+        else:  # Short header
+            return ShortHeaderPacket.decode_all_bytes(byte_stream, destination_cid=destination_cid)
+    except ValueError:
+        # TODO: log?
+        return None, 0
+
+def decode_udp_packet(payload: bytes, destination_cid: bytes = None):
+    """
+    Generator that yields each QUIC packet in a UDP datagram.
+    :param payload: bytes to be decoded into 1 or multiple QUIC packets
+    :param destination_cid: optional destination connection ID, which is required for decoding 1-RTT QUIC packets
+    """
+    offset = 0
+    while offset < len(payload):
+        # Skip NUL padding bytes (PADDING frames)
+        if payload[offset] == 0x00:
+            offset += 1
+            continue
+
+        # Try to decode one packet from current position
+        packet, consumed = decode_quic_packet(payload[offset:], destination_cid=destination_cid)
+        if consumed <= 0 or packet is None:
+            # TODO: log error message somewhere or silently drop?
+            break  # stop parsing
+
+        yield packet
+        offset += consumed

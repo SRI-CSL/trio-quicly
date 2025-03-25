@@ -1,11 +1,10 @@
 # echo-client.py
 import sys
 import random
-
 import trio
 
 from trioquic.client import open_quic_connection
-from trioquic.connection import SimpleQuicConnection
+from trioquic.connection_new import SimpleQuicConnection
 
 if sys.version_info < (3, 11):
     pass
@@ -69,7 +68,7 @@ async def two_clients():
 
 
 try:
-    trio.run(parent, )
-    # trio.run(two_clients, )
+    # trio.run(parent, )
+    trio.run(two_clients, )
 except* KeyboardInterrupt:
     pass

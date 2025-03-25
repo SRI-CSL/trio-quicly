@@ -2,11 +2,12 @@ import errno
 import trio
 from typing import *
 
-from trio._highlevel_serve_listeners import StreamT, Handler
+from .configuration import QuicConfiguration
+from .connection_new import SimpleQuicConnection
+from .endpoint import QuicServer, PosArgsT
 
-from trioquic.configuration import QuicConfiguration
-from trioquic.connection import SimpleQuicConnection, QuicServer, PosArgsT
-
+StreamT = TypeVar("StreamT", bound=trio.abc.AsyncResource)
+Handler = Callable[[StreamT], Awaitable[object]]
 
 async def open_quic_servers(
     port: int,

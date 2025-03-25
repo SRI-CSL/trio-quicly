@@ -1,11 +1,9 @@
-from contextlib import contextmanager
-import socket
 import trio
 from typing import *
 
-from trioquic.configuration import QuicConfiguration
-from trioquic.connection import SimpleQuicConnection, QuicClient
-
+from .configuration import QuicConfiguration
+from .connection_new import SimpleQuicConnection
+from .endpoint import QuicClient
 
 # @contextmanager
 # def close_all() -> Generator[set[trio.socket.SocketType], None, None]:

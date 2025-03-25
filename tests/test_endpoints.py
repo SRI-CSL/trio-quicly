@@ -1,11 +1,11 @@
 from contextlib import asynccontextmanager
-import socket as psocket
 import trio
 from typing import *
 import pytest
 
 from trioquic.configuration import QuicConfiguration
-from trioquic.connection import QuicServer, QuicClient, QuicEndpoint, SimpleQuicConnection
+from trioquic.endpoint import QuicServer, QuicClient, QuicEndpoint
+from trioquic.connection_new import SimpleQuicConnection
 from trioquic.server import open_quic_servers
 from .tutils import binds_ipv6
 

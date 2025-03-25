@@ -1,7 +1,7 @@
 import pytest
 
 from trioquic.configuration import QuicConfiguration
-from trioquic.connection import SimpleQuicConnection
+from trioquic.connection_new import SimpleQuicConnection
 
 
 # def test_wrong_client_conf1():
@@ -24,4 +24,4 @@ from trioquic.connection import SimpleQuicConnection
 
 def test_no_endpoint():
     with pytest.raises(AssertionError):
-        SimpleQuicConnection(None, ("bla", 12345), QuicConfiguration())
+        SimpleQuicConnection(None, ("bla", 12345), 0, QuicConfiguration())

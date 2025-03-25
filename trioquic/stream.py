@@ -2,7 +2,7 @@ from typing import *
 
 import trio.abc
 
-from trioquic.connection import QuicConnection
+from trioquic.endpoint import QuicConnection
 
 # Stream Types
 # 0x00 	Client-Initiated, Bidirectional

@@ -2,7 +2,7 @@ from itertools import count
 import sys
 import trio
 
-from trioquic.connection import SimpleQuicConnection
+from trioquic.connection_new import SimpleQuicConnection
 from trioquic.server import serve_quic
 
 if sys.version_info < (3, 11):

@@ -5,7 +5,8 @@ import pytest
 
 from trioquic.crypto import decode_var_length_int, encode_packet_number, decode_packet_number
 from trioquic.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
-    encode_var_length_int, VersionNegotiationPacket, ShortHeaderPacket, QuicPacket, decode_quic_packet, LongHeaderPacket
+    encode_var_length_int, VersionNegotiationPacket, ShortHeaderPacket, QuicPacket, decode_quic_packet, \
+    LongHeaderPacket, decode_udp_packet
 
 sample_dcid = bytes.fromhex("c2 19 7c 5e ff 14 e8")  # 7 Bytes long
 sample_scid = bytes.fromhex("ff 14 e8 8c")  # 4 Bytes long
@@ -75,13 +76,13 @@ def test_ver_neg_pkt():
     assert sample_scid == packet[14:18]
     assert QuicProtocolVersion.VERSION_1 == int.from_bytes(packet[18:22])
 
-    decoded_pkt = VersionNegotiationPacket.decode_all_bytes(packet)
+    decoded_pkt, consumed = VersionNegotiationPacket.decode_all_bytes(packet)
     assert len(decoded_pkt.supported_versions) == 2
     assert QuicProtocolVersion.VERSION_1 == decoded_pkt.supported_versions[0]
     assert silly_version == decoded_pkt.supported_versions[1]
 
     # adding 2 extra bytes at end that should be safely ignored:
-    decoded_pkt = decode_quic_packet(
+    decoded_pkt, consumed = decode_quic_packet(
         bytes.fromhex("80 00 00 00 00 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 00 00 00 01 aa bb cc dd ff ee"))
     assert isinstance(decoded_pkt, VersionNegotiationPacket)
     assert len(decoded_pkt.supported_versions) == 2
@@ -99,11 +100,11 @@ def test_short_header():
     assert sample_dcid == packet[1:8]  # 2..8 bytes are destination connection ID
     assert packet_number == int.from_bytes(packet[8:8+len(encoded_pn)])  # 9..11 bytes are packet number
 
-    decoded_pkt = ShortHeaderPacket.decode_all_bytes(packet, destination_cid=sample_dcid)
+    decoded_pkt, consumed = ShortHeaderPacket.decode_all_bytes(packet, destination_cid=sample_dcid)
     assert decoded_pkt.destination_cid == sample_dcid
     assert decoded_pkt.packet_number == packet_number
 
-    decoded_pkt = decode_quic_packet(bytes.fromhex("46 c2 19 7c 5e ff 14 e8 ac 5c 02 ee"), destination_cid=sample_dcid)
+    decoded_pkt, consumed = decode_quic_packet(bytes.fromhex("46 c2 19 7c 5e ff 14 e8 ac 5c 02 ee"), destination_cid=sample_dcid)
     assert isinstance(decoded_pkt, ShortHeaderPacket)
 
 def test_initial_packets():
@@ -139,7 +140,7 @@ def test_initial_packets():
     assert bytes.fromhex("dd 65 20 02") == packet[24+start+len(encoded_pn):]
 
     # adding some padding of NUL bytes at the end
-    decoded_pkt = decode_quic_packet(
+    decoded_pkt, consumed = decode_quic_packet(
         bytes.fromhex("c2 00 00 00 01 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 dd 65 20 02 00 00 00"))
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.is_long_header
@@ -177,7 +178,7 @@ def test_quic_packets():
     assert packet_number == int.from_bytes(packet[18+start:18+start+len(encoded_pn)])
     assert bytes.fromhex("bb aa 55") == packet[18+start+len(encoded_pn):]
 
-    decoded_pkt = decode_quic_packet(packet)
+    decoded_pkt, consumed = decode_quic_packet(packet)
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.packet_type == QuicPacketType.HANDSHAKE
     assert decoded_pkt.version == QuicProtocolVersion.VERSION_1
@@ -202,7 +203,7 @@ def test_retry_packets():
     assert tkn == packet[18:18+len(tkn)]
     assert integrity_tag == packet[-16:]
 
-    decoded_pkt = decode_quic_packet(packet)
+    decoded_pkt, consumed = decode_quic_packet(packet)
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.packet_type == QuicPacketType.RETRY
     assert decoded_pkt.version == QuicProtocolVersion.VERSION_1
@@ -210,3 +211,22 @@ def test_retry_packets():
     assert decoded_pkt.source_cid == sample_scid
     assert decoded_pkt.token == tkn
     assert decoded_pkt.integrity_tag == integrity_tag
+
+def test_udp_packets():
+    tkn = bytes.fromhex("c5 00 7f ff 25")
+    initial_pkt_w_tkn = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
+                                           token=tkn, packet_number=packet_number, payload=bytes.fromhex("dd 65 20 02"))
+    initial_encoded = initial_pkt_w_tkn.encode_all_bytes()
+    handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE, sample_dcid, source_cid=sample_scid,
+                                       packet_number=packet_number, payload=bytes.fromhex("bb aa 55"))
+    handshake_encoded = handshake_pkt.encode_all_bytes()
+
+    packets = list(decode_udp_packet(bytes(0)))
+    assert len(packets) == 0
+    packets = list(decode_udp_packet(handshake_encoded))
+    assert len(packets) == 1
+    # ignore NUL padding:
+    packets = list(decode_udp_packet(initial_encoded + handshake_encoded + bytes.fromhex("00 00 00 00 00")))
+    assert len(packets) == 2
+    packets = list(decode_udp_packet(initial_encoded + bytes.fromhex("00 00 00") + handshake_encoded))
+    assert len(packets) == 2
