@@ -136,7 +136,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         return client_initial_pkt.encode_all_bytes().ljust(SMALLEST_MAX_DATAGRAM_SIZE, b'\x00')
 
     async def do_handshake(self, hello_payload: bytes, *, initial_retransmit_timeout: float = 1.0,
-                           stream_payload: bytes = None) -> None:
+                           stream_payload: bytes = None) -> bool:
         """Perform the handshake.
 
         It's safe to call this multiple times, or call it simultaneously from multiple
@@ -166,7 +166,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         """
         async with (self._handshake_lock):
             if self._did_handshake:
-                return
+                return True
 
             # TODO: perform actual QUIC handshake (implementing TLS 1.3 etc.)
             if self._is_client:
@@ -245,7 +245,13 @@ class SimpleQuicConnection(trio.abc.Stream):
             else:  # server-side of handshake
                 # parse hello_payload as client initial packet:
                 client_initial_pkt = next(decode_udp_packet(hello_payload))
-                assert len(hello_payload) == SMALLEST_MAX_DATAGRAM_SIZE  # should be padded
+                # NOTE: A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that
+                # is smaller than the smallest allowed maximum datagram size of 1200 bytes. TODO: A server MAY also
+                #  immediately close the connection by sending a CONNECTION_CLOSE frame with an error code of
+                #  PROTOCOL_VIOLATION
+                if len(hello_payload) < SMALLEST_MAX_DATAGRAM_SIZE:
+                    # TODO: logging and
+                    return False
                 assert isinstance(client_initial_pkt, LongHeaderPacket)
                 assert client_initial_pkt.packet_type == QuicPacketType.INITIAL
                 # TODO: if error then close this connection? self.close()
@@ -288,6 +294,7 @@ class SimpleQuicConnection(trio.abc.Stream):
                     stream_payload = one_rtt_pkt.payload  # TODO: forward payload from 2nd packet...
 
             self._did_handshake = True
+            return True
 
     async def send_all(self, data: bytes | bytearray | memoryview) -> None:
         """Sends the given data through the stream, blocking if necessary.

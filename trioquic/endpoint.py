@@ -303,10 +303,11 @@ class QuicServer(QuicEndpoint):
             task_status.started()
 
             async def establish_and_handle(new_connection: SimpleQuicConnection, initial_payload: bytes) -> None:
-                await new_connection.do_handshake(initial_payload)
-                if not new_connection.is_closed:  # handshake was successful
+                if await new_connection.do_handshake(initial_payload) and not new_connection.is_closed:
+                    # handshake was successful
                     with new_connection:
                         await handler(new_connection, *args)
+                # TODO: if we end up here, we should remove the connection from the endpoint's list!
 
             async with trio.open_nursery() as nursery:
                 if handler_nursery is None:
@@ -419,7 +420,7 @@ class QuicClient(QuicEndpoint):
         (payload, remote_address) = await self.new_connections_q.r.receive()  # TODO: what about timeouts?
         connection.remote_address = remote_address
         self.connections[connection.remote_address] = connection
-        await connection.do_handshake(payload) # TODO: check that payload is INITIAL, 0 from server etc.
+        await connection.do_handshake(payload) # TODO: check that return is True, payload is INITIAL, 0 from server etc.
         if connection.is_closed:
             raise QuicProtocolError("Could not establish QUIC connection")
         return connection

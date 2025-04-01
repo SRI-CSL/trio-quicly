@@ -1,12 +1,11 @@
 import math
 import secrets
 
-import pytest
-
 from trioquic.crypto import decode_var_length_int, encode_packet_number, decode_packet_number
 from trioquic.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
-    encode_var_length_int, VersionNegotiationPacket, ShortHeaderPacket, QuicPacket, decode_quic_packet, \
+    VersionNegotiationPacket, ShortHeaderPacket, decode_quic_packet, \
     LongHeaderPacket, decode_udp_packet
+from trioquic.frame import encode_var_length_int
 
 sample_dcid = bytes.fromhex("c2 19 7c 5e ff 14 e8")  # 7 Bytes long
 sample_scid = bytes.fromhex("ff 14 e8 8c")  # 4 Bytes long
@@ -18,24 +17,6 @@ encoded_pn = encode_packet_number(packet_number)
 # the four-byte sequence 0x9d7f3e7d decodes to 494,878,333;
 # the two-byte sequence 0x7bbd decodes to 15,293;
 # and the single byte 0x25 decodes to 37 (as does the two-byte sequence 0x4025).
-def test_var_int_encoding():
-    assert decode_var_length_int(bytes.fromhex("c2197c5eff14e88c")) == (int("151,288,809,941,952,652".replace(",", "")), 8)
-    assert decode_var_length_int(bytes.fromhex("9d7f3e7d")) == (int("494,878,333".replace(",", "")), 4)
-    assert decode_var_length_int(bytes.fromhex("7bbd")) == (int("15,293".replace(",", "")), 2)
-    assert decode_var_length_int(bytes.fromhex("25")) == (37, 1)
-    assert decode_var_length_int(bytes.fromhex("4025")) == (37, 2)
-
-    assert encode_var_length_int(63) == b'\x3f'
-    assert encode_var_length_int(64) == b'\x40\x40'
-    assert encode_var_length_int(16383) == b'\x7f\xff'
-    assert encode_var_length_int(16384) == b'\x80\x00\x40\x00'
-    assert len(encode_var_length_int(2 ** 30 - 1)) == 4
-    assert len(encode_var_length_int(2 ** 30)) == 8
-
-    with pytest.raises(ValueError):
-        encode_var_length_int(-5)
-    with pytest.raises(ValueError):
-        encode_var_length_int(2 ** 63)
 
 # For example, if an endpoint has received an acknowledgment for packet 0xabe8b3 and is sending a packet with a number
 # of 0xac5c02, there are 29,519 (0x734f) outstanding packet numbers. In order to represent at least twice this range

@@ -1,12 +1,12 @@
 import math
 import struct
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum, IntFlag
-from importlib.metadata import requires
+from enum import IntEnum
 from typing import *
 
-from trioquic.crypto import decode_var_length_int
-from trioquic.exceptions import QuicProtocolViolation
+from .crypto import decode_var_length_int
+from .exceptions import QuicProtocolViolation
+from .frame import encode_var_length_int
 
 MAX_UDP_PACKET_SIZE = 65527
 
@@ -17,36 +17,13 @@ MAX_UDP_PACKET_SIZE = 65527
 
 CLIENT_VERSION = bytes.fromhex("03 03")  # always indicates TLS 1.2 to allow passing through middle boxes
 PACKET_LONG_HEADER = 0x80
-PACKET_FIXED_BIT = 0x40
-PACKET_SPIN_BIT = 0x20
-
-def get_spin_bit(first_byte: int) -> bool:
-    return bool(first_byte & PACKET_SPIN_BIT)
+# PACKET_FIXED_BIT = 0x40
+# PACKET_SPIN_BIT = 0x20
+# def get_spin_bit(first_byte: int) -> bool:
+#     return bool(first_byte & PACKET_SPIN_BIT)
 
 def is_long_header(first_byte: int) -> bool:
     return bool(first_byte & PACKET_LONG_HEADER)
-
-def encode_var_length_int(value: int) -> bytes:
-    """
-    Encode a variable length integer from a stream of bytes.
-
-    :param value: integer value to be encoded
-    :return: 1-8 bytes with the encoded value
-    """
-    if not (0 <= value < 2 ** 62):
-        raise ValueError("QUIC variable-length integers must be in range [0, 2^62).")
-
-    if value < 2 ** 6:  # 1-byte encoding: 00xxxxxx
-        return bytes([value | 0b00000000])
-    elif value < 2 ** 14:  # 2-byte encoding: 01xxxxxxxxxxxxxx
-        value |= 0b01 << 14  # Set length bits
-        return value.to_bytes(2, "big")
-    elif value < 2 ** 30:  # 4-byte encoding: 10xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-        value |= 0b10 << 30
-        return value.to_bytes(4, "big")
-    else:  # 8-byte encoding: 11...
-        value |= 0b11 << 62
-        return value.to_bytes(8, "big")
 
 def get_connection_id(data: bytes) -> tuple[bytes, int]:
     cid_length = int.from_bytes(data[0:1], "big") # first byte has length information
@@ -57,64 +34,6 @@ class QuicProtocolVersion(IntEnum):
     NEGOTIATION = 0
     VERSION_1 = 0x00000001
     # VERSION_2 = 0x6B3343CF
-
-class QuicFrameType(IntEnum):
-    PADDING = 0x00
-    PING = 0x01
-    ACK = 0x02
-    ACK_ECN = 0x03
-    RESET_STREAM = 0x04
-    STOP_SENDING = 0x05
-    CRYPTO = 0x06
-    NEW_TOKEN = 0x07
-    STREAM_BASE = 0x08
-    MAX_DATA = 0x10
-    MAX_STREAM_DATA = 0x11
-    MAX_STREAMS_BIDI = 0x12
-    MAX_STREAMS_UNI = 0x13
-    DATA_BLOCKED = 0x14
-    STREAM_DATA_BLOCKED = 0x15
-    STREAMS_BLOCKED_BIDI = 0x16
-    STREAMS_BLOCKED_UNI = 0x17
-    NEW_CONNECTION_ID = 0x18
-    RETIRE_CONNECTION_ID = 0x19
-    PATH_CHALLENGE = 0x1A
-    PATH_RESPONSE = 0x1B
-    TRANSPORT_CLOSE = 0x1C
-    APPLICATION_CLOSE = 0x1D
-    HANDSHAKE_DONE = 0x1E
-    DATAGRAM = 0x30
-    DATAGRAM_WITH_LENGTH = 0x31
-
-NON_ACK_ELICITING_FRAME_TYPES = frozenset(
-    [
-        QuicFrameType.ACK,
-        QuicFrameType.ACK_ECN,
-        QuicFrameType.PADDING,
-        QuicFrameType.TRANSPORT_CLOSE,
-        QuicFrameType.APPLICATION_CLOSE,
-    ]
-)
-NON_IN_FLIGHT_FRAME_TYPES = frozenset(
-    [
-        QuicFrameType.ACK,
-        QuicFrameType.ACK_ECN,
-        QuicFrameType.TRANSPORT_CLOSE,
-        QuicFrameType.APPLICATION_CLOSE,
-    ]
-)
-PROBING_FRAME_TYPES = frozenset(
-    [
-        QuicFrameType.PATH_CHALLENGE,
-        QuicFrameType.PATH_RESPONSE,
-        QuicFrameType.PADDING,
-        QuicFrameType.NEW_CONNECTION_ID,
-    ]
-)
-
-@dataclass
-class QuicFrame:
-    content: bytes
 
 class QuicPacketType(IntEnum):
     INITIAL = 0
