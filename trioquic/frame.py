@@ -157,7 +157,7 @@ class QuicFrame:
     @classmethod
     def decode(cls, data: bytes) -> "QuicFrame":
         # first byte contains always the type:
-        var_int = decode_var_length_int(data[0:1])
+        var_int, _ = decode_var_length_int(data[0:1])
         frame_type = QuicFrameType(var_int)  # propagate ValueError
         if frame_type in [QuicFrameType.PADDING, QuicFrameType.PING]:
             return cls(frame_type)
