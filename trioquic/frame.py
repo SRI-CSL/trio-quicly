@@ -1,8 +1,10 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional
+from inspect import isclass
+from typing import Optional, List
 
 from .crypto import decode_var_length_int
+from .exceptions import QuicConnectionError, QuicErrorCode
 
 
 # QUIC Frame
@@ -129,7 +131,7 @@ class FrameSubtype:
         raise NotImplementedError()
 
     @classmethod
-    def decode(cls, data: bytes) -> "FrameSubtype":
+    def decode(cls, data: bytes) -> tuple["FrameSubtype", int]:
         raise NotImplementedError()
 
 @dataclass
@@ -155,27 +157,127 @@ class QuicFrame:
         return var_int + self.content.encode()
 
     @classmethod
-    def decode(cls, data: bytes) -> "QuicFrame":
+    def decode(cls, data: bytes) -> tuple["QuicFrame", int]:
         # first byte contains always the type:
         var_int, _ = decode_var_length_int(data[0:1])
         frame_type = QuicFrameType(var_int)  # propagate ValueError
         if frame_type in [QuicFrameType.PADDING, QuicFrameType.PING]:
-            return cls(frame_type)
+            return cls(frame_type), 1
+        if frame_type in [QuicFrameType.ACK, QuicFrameType.ACK_ECN]:
+            content, offset = ACKFrame.decode(data[1:], frame_type)
+            return cls(frame_type, content=content), offset + 1
         # TODO: handle other frame types here...
         raise NotImplementedError()
 
 @dataclass
-class ACKFrame(FrameSubtype):
-    largest_ack: int
-    ack_delay: int
-    ack_range_count: int
-    first_ack_range: int
-#   ACK Range (..) ...,
-#   [ECN Counts (..)],
+class ACKRange:
+    gap: int
+    ack_range_length: int
 
     def encode(self) -> bytes:
-        pass
+        return encode_var_length_int(self.gap) + encode_var_length_int(self.ack_range_length)
 
     @classmethod
-    def decode(cls, data: bytes) -> "ACKFrame":
-        pass
+    def decode(cls, data: bytes) -> tuple["ACKRange", int]:
+        gap, offset = decode_var_length_int(data)
+        ack_range_length, offset = decode_var_length_int(data[offset:], offset)
+        return cls(gap, ack_range_length), offset
+
+@dataclass
+class ECNCounts:
+    ect0: int
+    ect1: int
+    ce: int
+
+    def encode(self) -> bytes:
+        return (
+            encode_var_length_int(self.ect0) +
+            encode_var_length_int(self.ect1) +
+            encode_var_length_int(self.ce)
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> tuple["ECNCounts", int]:
+        ect0, offset = decode_var_length_int(data)
+        ect1, offset = decode_var_length_int(data[offset:], offset)
+        ce, offset = decode_var_length_int(data[offset:], offset)
+        return cls(ect0, ect1, ce), offset
+
+ACK_DELAY_EXPONENT = 3  # Used to scale ack_delay to/from encoded value
+
+@dataclass
+class ACKFrame(FrameSubtype):
+    largest_ack: int
+    ack_delay: int  # in microseconds
+    first_ack_range: int
+    ack_ranges: List[ACKRange] = field(default_factory=list)
+    ecn_counts: Optional[ECNCounts] = None
+
+    def __post_init__(self):
+        # Ensure that ACK delay is greater or equal 8
+        if self.ack_delay < 8:
+            raise ValueError("ACK delay must be at least 8")
+
+        # Ensure packet number math doesn't underflow
+        if self.largest_ack < self.first_ack_range:
+            raise QuicConnectionError(
+                QuicErrorCode.FRAME_ENCODING_ERROR,
+                "Invalid ACK frame: first_ack_range > largest_ack"
+            )
+
+        if len(self.ack_ranges) > 0:
+            lowest_ack = self.largest_ack - self.first_ack_range
+            for r in self.ack_ranges:
+                if lowest_ack < r.gap + r.ack_range_length + 1:
+                    raise QuicConnectionError(
+                        QuicErrorCode.FRAME_ENCODING_ERROR,
+                        "ACK range would underflow packet number space"
+                    )
+                lowest_ack -= r.gap + r.ack_range_length + 1
+
+    @property
+    def ack_range_count(self) -> int:
+        return len(self.ack_ranges)
+
+    def encode(self) -> bytes:
+        encoded_ack_delay = self.ack_delay // (1 << ACK_DELAY_EXPONENT)
+        ack_ranges_bytes = b''.join(r.encode() for r in self.ack_ranges)
+
+        frame_bytes = (
+            encode_var_length_int(self.largest_ack) +
+            encode_var_length_int(encoded_ack_delay) +
+            encode_var_length_int(self.ack_range_count) +
+            encode_var_length_int(self.first_ack_range) +
+            ack_ranges_bytes
+        )
+
+        if self.ecn_counts:
+            frame_bytes += self.ecn_counts.encode()
+
+        return frame_bytes
+
+    @classmethod
+    def decode(cls, data: bytes, frame_type: int = QuicFrameType.ACK) -> tuple["ACKFrame", int]:
+        largest_ack, offset = decode_var_length_int(data)
+        encoded_ack_delay, offset = decode_var_length_int(data[offset:], offset)
+        ack_range_count, offset = decode_var_length_int(data[offset:], offset)
+        first_ack_range, offset = decode_var_length_int(data[offset:], offset)
+
+        ack_ranges = []
+        for _ in range(ack_range_count):
+            gap, offset = decode_var_length_int(data[offset:], offset)
+            length, offset = decode_var_length_int(data[offset:], offset)
+            ack_ranges.append(ACKRange(gap=gap, ack_range_length=length))
+
+        ecn_counts = None
+        ecn_offset = 0
+        if frame_type == QuicFrameType.ACK_ECN:
+            ecn_counts, ecn_offset = ECNCounts.decode(data[offset:])
+
+        return cls(
+            largest_ack=largest_ack,
+            ack_delay=encoded_ack_delay * (1 << ACK_DELAY_EXPONENT),
+            first_ack_range=first_ack_range,
+            ack_ranges=ack_ranges,
+            ecn_counts=ecn_counts
+        ), offset + ecn_offset

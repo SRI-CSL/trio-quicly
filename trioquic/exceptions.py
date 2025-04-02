@@ -1,5 +1,14 @@
 from enum import IntEnum
 
+class QuicProtocolError(Exception):
+    """Base class for all QUIC protocol-related exceptions."""
+    pass
+
+class QuicProtocolViolation(QuicProtocolError):
+    """Raised when the peer violates the communication protocol (as defined by standard)."""
+    pass
+
+
 class QuicErrorCode(IntEnum):
     NO_ERROR = 0x0
     INTERNAL_ERROR = 0x1
@@ -19,18 +28,11 @@ class QuicErrorCode(IntEnum):
     AEAD_LIMIT_REACHED = 0xF
     CRYPTO_ERROR = 0x100
 
-class QuicProtocolError(Exception):
-    """Base class for all QUIC protocol-related exceptions."""
-    pass
+class QuicConnectionError(QuicProtocolError):
+    def __init__(self, error_code: QuicErrorCode, reason_phrase: str):
+        self.error_code = error_code
+        self.reason_phrase = reason_phrase
 
-class QuicProtocolViolation(QuicProtocolError):
-    """Raised when the peer violates the communication protocol (as defined by standard)."""
-    pass
-
-class QuicFrameEncodingError(QuicProtocolError):
-    """Raised when an endpoint receives a frame of unknown type, for example."""
-    pass
-
-class QuicProtocolTimeout(QuicProtocolError):
-    """Raised when a peer times out."""
-    pass
+# class QuicProtocolTimeout(QuicProtocolError):
+#     """Raised when a peer times out."""
+#     pass

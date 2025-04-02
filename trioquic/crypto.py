@@ -24,12 +24,13 @@ INITIAL_SALT_VERSION_2 = bytes.fromhex("0dede3def700a6db819381be6e269dcbf9bd2ed9
 SAMPLE_SIZE = 16
 
 
-def decode_var_length_int(data: bytes) -> tuple[int, int]:
+def decode_var_length_int(data: bytes, prior_offset: int = 0) -> tuple[int, int]:
     """
     Decode a variable length integer from a stream of bytes.
 
     See: Appendix A - Sample Variable-Length Integer Decoding
 
+    :param prior_offset: will be added to the number of bytes used to facilitate more compact code when parsing bytes
     :param data: single byte of data to be decoded
     :return: a pair of decoded integer and length of bytes used for decoding (offset into original data)
     """
@@ -42,7 +43,7 @@ def decode_var_length_int(data: bytes) -> tuple[int, int]:
     v = v & 0x3f
     for next_byte in data[1:length]:
         v = (v << 8) + next_byte
-    return v, length
+    return v, length + prior_offset
 
 
 def encode_packet_number(full_pn: int, largest_acked: int = None) -> bytes:
