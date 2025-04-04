@@ -134,6 +134,13 @@ class FrameSubtype:
     def decode(cls, data: bytes) -> tuple["FrameSubtype", int]:
         raise NotImplementedError()
 
+FRAME_TYPE_TO_CLASS = {}
+def register_frame_type(frame_type: QuicFrameType):
+    def wrapper(cls):
+        FRAME_TYPE_TO_CLASS[frame_type] = cls
+        return cls
+    return wrapper
+
 @dataclass
 class QuicFrame:
 
@@ -161,13 +168,22 @@ class QuicFrame:
         # first byte contains always the type:
         var_int, _ = decode_var_length_int(data[0:1])
         frame_type = QuicFrameType(var_int)  # propagate ValueError
+
+        # Frames without content
         if frame_type in [QuicFrameType.PADDING, QuicFrameType.PING]:
             return cls(frame_type), 1
-        if frame_type in [QuicFrameType.ACK, QuicFrameType.ACK_ECN]:
-            content, offset = ACKFrame.decode(data[1:], frame_type)
+
+        # Content-bearing frames
+        subtype_cls = FRAME_TYPE_TO_CLASS.get(frame_type)
+        if subtype_cls is not None:
+            # ACK/ACK_ECN special case: pass frame_type in
+            if frame_type in (QuicFrameType.ACK, QuicFrameType.ACK_ECN):
+                content, offset = subtype_cls.decode(data[1:], frame_type=frame_type)
+            else:
+                content, offset = subtype_cls.decode(data[1:])
             return cls(frame_type, content=content), offset + 1
-        # TODO: handle other frame types here...
-        raise NotImplementedError()
+
+        raise NotImplementedError(f"QUIC frame type {frame_type} not implemented")
 
 @dataclass
 class ACKRange:
@@ -205,6 +221,8 @@ class ECNCounts:
 
 ACK_DELAY_EXPONENT = 3  # Used to scale ack_delay to/from encoded value
 
+@register_frame_type(QuicFrameType.ACK)
+@register_frame_type(QuicFrameType.ACK_ECN)
 @dataclass
 class ACKFrame(FrameSubtype):
     largest_ack: int
@@ -281,3 +299,68 @@ class ACKFrame(FrameSubtype):
             ack_ranges=ack_ranges,
             ecn_counts=ecn_counts
         ), offset + ecn_offset
+
+@register_frame_type(QuicFrameType.RESET_STREAM)
+@dataclass
+class ResetStreamFrame(FrameSubtype):
+    stream_id: int
+    app_error: int
+    final_size: int
+
+    def encode(self) -> bytes:
+        return (
+            encode_var_length_int(self.stream_id) +
+            encode_var_length_int(self.app_error) +
+            encode_var_length_int(self.final_size)
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> tuple["ResetStreamFrame", int]:
+        stream_id, offset = decode_var_length_int(data)
+        app_error, offset = decode_var_length_int(data[offset:], offset)
+        final_size, offset = decode_var_length_int(data[offset:], offset)
+        return cls(stream_id, app_error, final_size), offset
+
+@register_frame_type(QuicFrameType.STOP_SENDING)
+@dataclass
+class StopSendingFrame(FrameSubtype):
+    stream_id: int
+    app_error: int
+
+    def encode(self) -> bytes:
+        return (
+            encode_var_length_int(self.stream_id) +
+            encode_var_length_int(self.app_error)
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> tuple["StopSendingFrame", int]:
+        stream_id, offset = decode_var_length_int(data)
+        app_error, offset = decode_var_length_int(data[offset:], offset)
+        return cls(stream_id, app_error), offset
+
+@register_frame_type(QuicFrameType.CRYPTO)
+@dataclass
+class CryptoFrame(FrameSubtype):
+    data_offset: int
+    crypto_data: bytes = b''
+
+    @property
+    def data_length(self) -> int:
+        return len(self.crypto_data)
+
+    def encode(self) -> bytes:
+        return (
+                encode_var_length_int(self.data_offset) +
+                encode_var_length_int(len(self.crypto_data)) +
+                self.crypto_data
+        )
+
+    @classmethod
+    def decode(cls, data: bytes) -> tuple["CryptoFrame", int]:
+        data_offset, offset = decode_var_length_int(data)
+        data_length, offset = decode_var_length_int(data[offset:], offset)
+        return cls(data_offset,
+                   crypto_data=data[offset:offset + data_length]), offset + data_length
+
+# TODO: continue with https://datatracker.ietf.org/doc/html/rfc9000#name-new_token-frames

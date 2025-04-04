@@ -4,7 +4,7 @@ import pytest
 
 from trioquic.crypto import decode_var_length_int
 from trioquic.exceptions import QuicConnectionError
-from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange
+from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame
 
 
 def test_var_int_encoding():
@@ -246,3 +246,36 @@ def test_quic_ack_and_ack_ecn_round_trip():
     assert decoded_ecn.content.first_ack_range == 5
     assert len(decoded_ecn.content.ack_ranges) == 2
     assert decoded_ecn.content.ecn_counts == ECNCounts(ect0=10, ect1=20, ce=30)
+
+def test_crypto_frame_round_trip():
+    crypto_data = b'\x01\x02\x03\x04hello world'
+    data_offset = 42
+
+    frame = CryptoFrame(
+        data_offset=data_offset,
+        crypto_data=crypto_data,
+    )
+    encoded = frame.encode()
+    decoded, consumed = CryptoFrame.decode(encoded)
+
+    assert consumed == len(encoded)
+    assert decoded.data_offset == data_offset
+    assert decoded.crypto_data == crypto_data
+    assert decoded.data_length == len(crypto_data)
+
+def test_quic_crypto_frame_round_trip():
+    crypto_data = b"\x01\x02\x03\x04securecrypto"
+    data_offset = 77
+
+    frame = QuicFrame(
+        frame_type=QuicFrameType.CRYPTO,
+        content=CryptoFrame(data_offset=data_offset, crypto_data=crypto_data)
+    )
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.CRYPTO
+    assert isinstance(decoded.content, CryptoFrame)
+    assert decoded.content.data_offset == data_offset
+    assert decoded.content.crypto_data == crypto_data
