@@ -4,7 +4,10 @@ import pytest
 
 from trioquic.crypto import decode_var_length_int
 from trioquic.exceptions import QuicConnectionError
-from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame
+from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame, \
+    NewTokenFrame, StreamFrame, MaxDataFrame, MaxStreamData, StopSendingFrame, MaxStreamsBidiFrame, MaxStreamsUniFrame, \
+    DataBlockedFrame, StreamsBlockedBidiFrame, StreamsBlockedUniFrame, RetireConnectionIDFrame, StreamDataBlockedFrame, \
+    ConnectionCloseFrame, NewConnectionIDFrame
 
 
 def test_var_int_encoding():
@@ -43,6 +46,13 @@ def test_no_content():
     frame, offset = QuicFrame.decode(bytes.fromhex("01"))
     assert offset == 1
     assert frame.frame_type == QuicFrameType.PING
+    assert frame.content is None
+
+    with pytest.raises(ValueError):
+        QuicFrame(QuicFrameType.HANDSHAKE_DONE, content=b'not allowed')
+    frame, offset = QuicFrame.decode(bytes.fromhex("1e"))
+    assert offset == 1
+    assert frame.frame_type == QuicFrameType.HANDSHAKE_DONE
     assert frame.content is None
 
 def assert_ack_delay_equal(expected: int, actual: int, exponent: int = 3):
@@ -279,3 +289,246 @@ def test_quic_crypto_frame_round_trip():
     assert isinstance(decoded.content, CryptoFrame)
     assert decoded.content.data_offset == data_offset
     assert decoded.content.crypto_data == crypto_data
+
+def test_new_token_frame_round_trip():
+    token = b'sample-token-12345'
+    frame = QuicFrame(
+        frame_type=QuicFrameType.NEW_TOKEN,
+        content=NewTokenFrame(token=token)
+    )
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.NEW_TOKEN
+    assert isinstance(decoded.content, NewTokenFrame)
+    assert decoded.content.token == token
+    assert decoded.content.token_length == len(token)
+
+def test_stream_frame_flag_combinations():
+    from itertools import product
+
+    stream_id = 42
+    offset = 1337
+    data = b'hello stream'
+
+    for fin, len_flag, off in product([False, True], repeat=3):
+        # Manually build a frame with the flags
+        frame = QuicFrame(
+            frame_type=QuicFrameType.STREAM_BASE,  # the type will be determined during encode
+            content=StreamFrame(
+                stream_id=stream_id,
+                offset=offset if off else 0,
+                fin=fin,
+                data=data,
+                include_length=len_flag,
+            )
+        )
+
+        encoded = frame.encode()
+        decoded, consumed = QuicFrame.decode(encoded)
+
+        assert consumed == len(encoded)
+        assert decoded.frame_type == QuicFrameType.STREAM_BASE
+        assert isinstance(decoded.content, StreamFrame)
+        sf = decoded.content
+        assert sf.stream_id == stream_id
+        assert sf.offset == (offset if off else 0)
+        assert sf.fin == fin
+        assert sf.data == data
+        assert sf.include_length == len_flag
+
+def test_max_data_frame_round_trip():
+    max_data_value = 65535  # example value
+
+    frame = QuicFrame(
+        frame_type=QuicFrameType.MAX_DATA,
+        content=MaxDataFrame(max_data=max_data_value)
+    )
+
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.MAX_DATA
+    assert isinstance(decoded.content, MaxDataFrame)
+    assert decoded.content.max_data == max_data_value
+
+def test_max_stream_data_frame_round_trip():
+    stream_id = 1234
+    max_stream_data = 65536
+
+    frame = QuicFrame(
+        frame_type=QuicFrameType.MAX_STREAM_DATA,
+        content=MaxStreamData(stream_id=stream_id, max_stream_data=max_stream_data)
+    )
+
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.MAX_STREAM_DATA
+    assert isinstance(decoded.content, MaxStreamData)
+    assert decoded.content.stream_id == stream_id
+    assert decoded.content.max_stream_data == max_stream_data
+
+SINGLE_STREAM_VARINT_FRAMES = {
+    QuicFrameType.MAX_STREAM_DATA: MaxStreamData,
+    QuicFrameType.STOP_SENDING: StopSendingFrame,
+    # Add other stream-related frames as needed...
+}
+def test_stream_id_varint_frame_round_trip():
+    for frame_type, frame_cls in SINGLE_STREAM_VARINT_FRAMES.items():
+        stream_id = random.randint(0, 2**16)
+        value = random.randint(0, 2**20)
+
+        frame = QuicFrame(
+            frame_type=frame_type,
+            content=frame_cls(stream_id, value)
+        )
+
+        encoded = frame.encode()
+        decoded, consumed = QuicFrame.decode(encoded)
+
+        assert consumed == len(encoded)
+        assert decoded.frame_type == frame_type
+        assert isinstance(decoded.content, frame_cls)
+        assert decoded.content.stream_id == stream_id
+
+        # Check the second field based on frame class
+        if frame_type == QuicFrameType.MAX_STREAM_DATA:
+            assert decoded.content.max_stream_data == value
+        elif frame_type == QuicFrameType.STOP_SENDING:
+            assert decoded.content.app_error == value
+
+
+FRAME_TYPES_AND_FIELDS = {
+    QuicFrameType.MAX_DATA: ("max_data", MaxDataFrame),
+    QuicFrameType.MAX_STREAMS_BIDI: ("max_streams", MaxStreamsBidiFrame),
+    QuicFrameType.MAX_STREAMS_UNI: ("max_streams", MaxStreamsUniFrame),
+    QuicFrameType.DATA_BLOCKED: ("data_limit", DataBlockedFrame),
+    QuicFrameType.STREAMS_BLOCKED_BIDI: ("limit", StreamsBlockedBidiFrame),
+    QuicFrameType.STREAMS_BLOCKED_UNI: ("limit", StreamsBlockedUniFrame),
+    QuicFrameType.RETIRE_CONNECTION_ID: ("sequence_number", RetireConnectionIDFrame),
+}
+def test_single_varint_named_frames_round_trip():
+    for frame_type, (field_name, frame_cls) in FRAME_TYPES_AND_FIELDS.items():
+        value = random.randint(0, 2**30)
+
+        frame = QuicFrame(
+            frame_type=frame_type,
+            content=frame_cls(**{field_name: value})
+        )
+
+        encoded = frame.encode()
+        decoded, consumed = QuicFrame.decode(encoded)
+        assert consumed == len(encoded)
+        assert decoded.frame_type == frame_type
+        assert isinstance(decoded.content, frame_cls)
+        assert getattr(decoded.content, field_name) == value
+
+def test_stream_data_blocked_frame_round_trip():
+    stream_id = 1234
+    max_stream_data = 987654321
+
+    frame = QuicFrame(
+        frame_type=QuicFrameType.STREAM_DATA_BLOCKED,
+        content=StreamDataBlockedFrame(stream_id=stream_id, max_stream_data=max_stream_data)
+    )
+
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.STREAM_DATA_BLOCKED
+    assert isinstance(decoded.content, StreamDataBlockedFrame)
+    assert decoded.content.stream_id == stream_id
+    assert decoded.content.max_stream_data == max_stream_data
+
+def test_connection_close_frame_round_trip():
+    reason = b"stream reset due to timeout"
+    errno = 42
+    frame_type = 0x08  # Example: STREAM frame
+
+    # Test for Transport Close
+    frame = QuicFrame(
+        frame_type=QuicFrameType.TRANSPORT_CLOSE,
+        content=ConnectionCloseFrame(errno=errno, frame_type=frame_type, reason=reason)
+    )
+
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.TRANSPORT_CLOSE
+    assert isinstance(decoded.content, ConnectionCloseFrame)
+    assert decoded.content.errno == errno
+    assert decoded.content.frame_type == frame_type
+    assert decoded.content.reason == reason
+
+    frame = QuicFrame(
+        frame_type=QuicFrameType.APPLICATION_CLOSE,
+        content=ConnectionCloseFrame(errno=errno, frame_type=None, reason=reason)
+    )
+
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.APPLICATION_CLOSE
+    assert isinstance(decoded.content, ConnectionCloseFrame)
+    assert decoded.content.errno == errno
+    assert decoded.content.frame_type is None
+    assert decoded.content.reason == reason
+
+def test_new_connection_id_frame_round_trip():
+    seq_no = 5
+    retire_prior_to = 2
+    connection_id = b"\x11\x22\x33\x44\x55"
+    reset_token = b"\xaa" * 16
+
+    frame = QuicFrame(
+        frame_type=QuicFrameType.NEW_CONNECTION_ID,
+        content=NewConnectionIDFrame(
+            seq_no=seq_no,
+            retire_prior_to=retire_prior_to,
+            connection_id=connection_id,
+            reset_token=reset_token
+        )
+    )
+
+    encoded = frame.encode()
+    decoded, consumed = QuicFrame.decode(encoded)
+    assert consumed == len(encoded)
+    assert decoded.frame_type == QuicFrameType.NEW_CONNECTION_ID
+    assert isinstance(decoded.content, NewConnectionIDFrame)
+    assert decoded.content.seq_no == seq_no
+    assert decoded.content.retire_prior_to == retire_prior_to
+    assert decoded.content.connection_id == connection_id
+    assert decoded.content.reset_token == reset_token
+
+import pytest
+
+def test_new_connection_id_frame_validation_errors():
+    # ❌ Empty connection ID
+    with pytest.raises(ValueError, match="non-empty connection ID"):
+        NewConnectionIDFrame(
+            seq_no=0,
+            retire_prior_to=0,
+            connection_id=b"",
+            reset_token=b"\x00" * 16,
+        )
+
+    # ❌ Too-long connection ID (> 20 bytes)
+    with pytest.raises(ValueError, match="too long connection ID"):
+        NewConnectionIDFrame(
+            seq_no=0,
+            retire_prior_to=0,
+            connection_id=b"\x00" * 21,
+            reset_token=b"\x00" * 16,
+        )
+
+    # ❌ Invalid reset token length (≠ 16 bytes)
+    with pytest.raises(ValueError, match="reset token must be exactly 16 bytes"):
+        NewConnectionIDFrame(
+            seq_no=0,
+            retire_prior_to=0,
+            connection_id=b"\x01\x02",
+            reset_token=b"\x00" * 15,
+        )

@@ -8,8 +8,8 @@ class QuicProtocolViolation(QuicProtocolError):
     """Raised when the peer violates the communication protocol (as defined by standard)."""
     pass
 
-
 class QuicErrorCode(IntEnum):
+    """These can be used with Python exceptions and also in the QUIC Frame TRANSPORT_CLOSE = 0x1c"""
     NO_ERROR = 0x0
     INTERNAL_ERROR = 0x1
     CONNECTION_REFUSED = 0x2
