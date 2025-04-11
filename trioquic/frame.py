@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from inspect import isclass
 from typing import Optional, List, ClassVar
 
 from .crypto import decode_var_length_int
