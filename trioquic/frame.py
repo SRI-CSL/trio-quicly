@@ -195,6 +195,30 @@ class QuicFrame:
 
         raise NotImplementedError(f"QUIC frame type {frame_type} not implemented")
 
+def iter_quic_frames(data: bytes):
+    offset = 0
+    while offset < len(data):
+        try:
+            frame, consumed = QuicFrame.decode(data[offset:])
+        except ValueError:
+            break  # ignore all ValueErrors and stop parsing
+        offset += consumed
+        # if frame.frame_type == QuicFrameType.PADDING:
+        #     continue
+        yield frame, consumed
+
+def parse_all_quic_frames(data: bytes) -> tuple[list[QuicFrame], int]:
+    frames = []
+    total_consumed = 0
+
+    for frame, consumed in iter_quic_frames(data):
+        frames.append(frame)
+        total_consumed += consumed
+
+    return frames, total_consumed
+
+### QUIC Frame subtypes with content below:
+
 @dataclass
 class ACKRange:
     gap: int

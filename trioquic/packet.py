@@ -6,7 +6,7 @@ from typing import *
 
 from .crypto import decode_var_length_int
 from .exceptions import QuicProtocolViolation
-from .frame import encode_var_length_int
+from .frame import encode_var_length_int, QuicFrame, parse_all_quic_frames
 
 MAX_UDP_PACKET_SIZE = 65527
 
@@ -111,14 +111,14 @@ class LongHeaderPacket(QuicPacket):
     integrity_tag: bytes = None  # The retry integrity tag. Only present in `RETRY` packets.
 
     packet_number: Optional[int] = None  # Not used for `RETRY` packets
-    payload: Optional[bytes] = None  # Must contain at least 1 byte for all but `RETRY` packets
+    payload: Optional[List[QuicFrame]] = None  # Must contain at least 1 byte for all but `RETRY` packets
 
     def __post_init__(self):
         super().__post_init__()
         assert self.source_cid is not None
         if self.packet_type not in {QuicPacketType.RETRY, QuicPacketType.VERSION_NEGOTIATION}:
             assert self.packet_number is not None
-            assert self.payload is not None
+            assert self.payload is not None and len(self.payload) > 0
         elif self.packet_type is QuicPacketType.RETRY:
             assert self.integrity_tag is not None
             assert len(self.integrity_tag) == 16
@@ -149,34 +149,36 @@ class LongHeaderPacket(QuicPacket):
             len(self.source_cid),
             self.source_cid,
         )
-        if self.packet_type == QuicPacketType.INITIAL:
-            token_length = len(self.token) if self.token is not None else 0
-            token_length_encoded = encode_var_length_int(token_length)
-            prefix = long_packed_header \
-                + struct.pack(
-                    f"!{len(token_length_encoded)}s",
-                    token_length_encoded)
-            if token_length > 0:
-                prefix += self.token
-            length_encoded = encode_var_length_int(self.packet_number_length + len(self.payload))
-            return prefix \
-                + struct.pack(
-                    f"{len(length_encoded)}s{self.packet_number_length}s",
-                    length_encoded,
-                    self.packet_number.to_bytes(self.packet_number_length)) \
-                + self.payload
-        elif self.packet_type in {QuicPacketType.ZERO_RTT, QuicPacketType.HANDSHAKE}:
-            length_encoded = encode_var_length_int(self.packet_number_length + len(self.payload))
-            return long_packed_header \
-                + struct.pack(
-                    f"!{len(length_encoded)}s{self.packet_number_length}s",
-                    length_encoded,
-                    self.packet_number.to_bytes(self.packet_number_length)) \
-                + self.payload
-        elif self.packet_type == QuicPacketType.RETRY:
+        if self.packet_type == QuicPacketType.RETRY:
             return long_packed_header \
                 + self.token \
                 + self.integrity_tag
+        else:
+            payload_bytes = b''.join(p.encode() for p in self.payload)
+            if self.packet_type == QuicPacketType.INITIAL:
+                token_length = len(self.token) if self.token is not None else 0
+                token_length_encoded = encode_var_length_int(token_length)
+                prefix = long_packed_header \
+                    + struct.pack(
+                        f"!{len(token_length_encoded)}s",
+                        token_length_encoded)
+                if token_length > 0:
+                    prefix += self.token
+                length_encoded = encode_var_length_int(self.packet_number_length + len(payload_bytes))
+                return prefix \
+                    + struct.pack(
+                        f"{len(length_encoded)}s{self.packet_number_length}s",
+                        length_encoded,
+                        self.packet_number.to_bytes(self.packet_number_length)) \
+                    + payload_bytes
+            elif self.packet_type in {QuicPacketType.ZERO_RTT, QuicPacketType.HANDSHAKE}:
+                length_encoded = encode_var_length_int(self.packet_number_length + len(payload_bytes))
+                return long_packed_header \
+                    + struct.pack(
+                        f"!{len(length_encoded)}s{self.packet_number_length}s",
+                        length_encoded,
+                        self.packet_number.to_bytes(self.packet_number_length)) \
+                    + payload_bytes
         raise RuntimeError(f"Cannot encode packet type: {self.packet_type}")
 
     @classmethod
@@ -216,11 +218,13 @@ class LongHeaderPacket(QuicPacket):
         # all 3 remaining packet types now have length (i), packet number, and packet payload left from offset on:
         length, offset1 = decode_var_length_int(data[offset:])
         offset += offset1
+        frames, consumed = parse_all_quic_frames(data[offset+packet_number_length:offset+length]) # length includes packet number length and payload
+        assert consumed == length - packet_number_length
         return LongHeaderPacket(packet_type=packet_type,
                                 destination_cid=dst_cid, source_cid=src_cid,
                                 token=token,
                                 packet_number=int.from_bytes(data[offset:offset+packet_number_length]),
-                                payload=data[offset+packet_number_length:offset+length]), offset + length # length includes packet number length and payload
+                                payload=frames), offset + length
 
 @dataclass
 class VersionNegotiationPacket(LongHeaderPacket):
@@ -276,7 +280,7 @@ class ShortHeaderPacket(QuicPacket):
     spin_bit: bool = False
     key_phase: bool = True
     packet_number: int = field(init=True)
-    payload: bytes = field(init=True)
+    payload: List[QuicFrame] = field(init=True, default_factory=list)
 
     def __post_init__(self):
         super().__post_init__()
@@ -299,7 +303,8 @@ class ShortHeaderPacket(QuicPacket):
                                 self.encode_first_byte(),
                                     self.destination_cid,
                                     self.packet_number.to_bytes(self.packet_number_length))
-        return packed_header + self.payload
+        payload_bytes = b''.join(p.encode() for p in self.payload)
+        return packed_header + payload_bytes
 
     @classmethod
     def decode_all_bytes(cls, data: bytes, **kwargs) -> tuple["ShortHeaderPacket", int]:
@@ -326,10 +331,12 @@ class ShortHeaderPacket(QuicPacket):
 
         offset = 1 + len(dest_cid)
         # TODO: maybe the length of a 1-RTT packet can be deduced from the decryption/removing protection later?
+        #  For now, simply parse QUIC frames until end of data or error
+        frames, consumed = parse_all_quic_frames(data[offset + packet_number_length:])
         return ShortHeaderPacket(destination_cid=dest_cid,
                                  spin_bit=spin_bit, key_phase=key_phase,
                                  packet_number=int.from_bytes(data[offset:offset + packet_number_length]),
-                                 payload=data[offset + packet_number_length:]), len(data)
+                                 payload=frames), offset + packet_number_length + consumed
 
 def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kwargs) -> QuicPacket:
     assert packet_type is not None

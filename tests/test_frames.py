@@ -1,13 +1,12 @@
-from copy import deepcopy
 import random
-import pytest
+from copy import deepcopy
 
 from trioquic.crypto import decode_var_length_int
 from trioquic.exceptions import QuicConnectionError
 from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame, \
     NewTokenFrame, StreamFrame, MaxDataFrame, MaxStreamData, StopSendingFrame, MaxStreamsBidiFrame, MaxStreamsUniFrame, \
     DataBlockedFrame, StreamsBlockedBidiFrame, StreamsBlockedUniFrame, RetireConnectionIDFrame, StreamDataBlockedFrame, \
-    ConnectionCloseFrame, NewConnectionIDFrame
+    ConnectionCloseFrame, NewConnectionIDFrame, parse_all_quic_frames
 
 
 def test_var_int_encoding():
@@ -532,3 +531,16 @@ def test_new_connection_id_frame_validation_errors():
             connection_id=b"\x01\x02",
             reset_token=b"\x00" * 15,
         )
+
+def test_iterating_frames():
+    # Compose a stream of frames (e.g., PADDING + MAX_DATA + PADDING)
+    data = b''.join([
+        QuicFrame(frame_type=QuicFrameType.PADDING).encode(),
+        QuicFrame(frame_type=QuicFrameType.MAX_DATA, content=MaxDataFrame(max_data=42)).encode(),
+        QuicFrame(frame_type=QuicFrameType.PADDING).encode(),
+    ])
+
+    frames, consumed = parse_all_quic_frames(data + b'garbage')
+    assert len(frames) == 3
+    assert frames[1].frame_type == QuicFrameType.MAX_DATA
+    assert consumed == 4

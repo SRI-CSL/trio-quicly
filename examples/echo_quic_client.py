@@ -68,7 +68,7 @@ async def two_clients():
 
 
 try:
-    # trio.run(parent, )
-    trio.run(two_clients, )
+    trio.run(parent, )
+    # trio.run(two_clients, )
 except* KeyboardInterrupt:
     pass
