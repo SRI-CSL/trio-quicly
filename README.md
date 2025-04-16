@@ -1,5 +1,5 @@
 # trio-quicly
-Reference implementation of QUIC-LY transport protocal using the Python Trio framework.
+Reference implementation of QUIC-LY transport protocol (which is QUIC without encryption) using the Python Trio framework.
 
 ## QUIC-LY
 
