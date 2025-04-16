@@ -1,11 +1,11 @@
 import math
 import secrets
 
-from trioquic.crypto import decode_var_length_int, encode_packet_number, decode_packet_number
-from trioquic.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
+from quicly.crypto import decode_var_length_int, encode_packet_number, decode_packet_number
+from quicly.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
     VersionNegotiationPacket, ShortHeaderPacket, decode_quic_packet, \
     LongHeaderPacket, decode_udp_packet
-from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, MaxDataFrame, parse_all_quic_frames
+from quicly.frame import encode_var_length_int, QuicFrame, QuicFrameType, MaxDataFrame, parse_all_quic_frames
 
 sample_dcid = bytes.fromhex("c2 19 7c 5e ff 14 e8")  # 7 Bytes long
 sample_scid = bytes.fromhex("ff 14 e8 8c")  # 4 Bytes long

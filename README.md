@@ -1,5 +1,5 @@
 # trio-quicly
-Reference implementation of QUIC-LY transport protocol (which is QUIC without encryption) using the Python Trio framework.
+Reference implementation of QUIC-LY transport protocol (which is QUIC without encryption) using the [Python Trio][_Trio] framework.
 
 ## QUIC-LY
 
@@ -14,6 +14,11 @@ QUIC-LY is designed for use cases where encryption is not required, but reliabil
 It trims down the original QUIC protocol by removing TLS, reducing metadata, and focusing on just what you need:  
 **Reliable delivery, congestion control, and stream multiplexing — without the crypto baggage.**
 
+QUIC-LY is a simplified version of QUIC for educational and experimental purposes.  
+It omits encryption, focusing on core transport functionality.
+
+QUIC v1 was standardized in May 2021 in [RFC 9000][_RFC 9000] and accompanied by [RFC 9002][_RFC 9002] ("QUIC Loss Detection and Congestion Control").  
+
 ---
 
 ## ✨ Features
@@ -27,4 +32,41 @@ It trims down the original QUIC protocol by removing TLS, reducing metadata, and
 
 ---
 
-## 📦 Installation
+## Design Goals
+
+- Easy to understand and modify
+- Based on Python and the Trio async framework
+- Close adherence to the IETF QUIC transport specification (minus TLS) including Loss Detection and Congestion Control.
+
+## Project Layout
+
+- `quicly/` — Core protocol logic
+- `examples/` — Sample client/server apps
+- `tests/` — Unit tests
+
+## Requirements
+
+- Python 3.10+
+- [Python Poetry](https://python-poetry.org/)
+
+## Getting Started
+
+Install Poetry if you don't have it
+```bash
+curl -sSL https://install.python-poetry.org | python3 -
+```
+
+Install project dependencies
+```bash
+poetry install
+```
+
+Activate the virtual environment and run examples
+```bash
+poetry run python examples/server.py
+poetry run python examples/client.py
+```
+
+[_Trio]: https://trio.readthedocs.io/en/stable/
+[_RFC 9000]: https://datatracker.ietf.org/doc/html/rfc9000
+[_RFC 9002]: https://datatracker.ietf.org/doc/html/rfc9002

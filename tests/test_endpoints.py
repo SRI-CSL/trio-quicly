@@ -3,10 +3,10 @@ import trio
 from typing import *
 import pytest
 
-from trioquic.configuration import QuicConfiguration
-from trioquic.endpoint import QuicServer, QuicClient, QuicEndpoint
-from trioquic.connection import SimpleQuicConnection
-from trioquic.server import open_quic_servers
+from quicly.configuration import QuicConfiguration
+from quicly.endpoint import QuicServer, QuicClient, QuicEndpoint
+from quicly.connection import SimpleQuicConnection
+from quicly.server import open_quic_servers
 from .tutils import binds_ipv6
 
 parametrize_ipv6 = pytest.mark.parametrize(

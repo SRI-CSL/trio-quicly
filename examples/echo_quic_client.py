@@ -3,8 +3,8 @@ import sys
 import random
 import trio
 
-from trioquic.client import open_quic_connection
-from trioquic.connection import SimpleQuicConnection
+from quicly.client import open_quic_connection
+from quicly.connection import SimpleQuicConnection
 
 if sys.version_info < (3, 11):
     pass

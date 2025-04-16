@@ -1,9 +1,9 @@
 import random
 from copy import deepcopy
 
-from trioquic.crypto import decode_var_length_int
-from trioquic.exceptions import QuicConnectionError
-from trioquic.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame, \
+from quicly.crypto import decode_var_length_int
+from quicly.exceptions import QuicConnectionError
+from quicly.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame, \
     NewTokenFrame, StreamFrame, MaxDataFrame, MaxStreamData, StopSendingFrame, MaxStreamsBidiFrame, MaxStreamsUniFrame, \
     DataBlockedFrame, StreamsBlockedBidiFrame, StreamsBlockedUniFrame, RetireConnectionIDFrame, StreamDataBlockedFrame, \
     ConnectionCloseFrame, NewConnectionIDFrame, parse_all_quic_frames
