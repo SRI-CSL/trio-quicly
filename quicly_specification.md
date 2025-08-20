@@ -6,9 +6,10 @@ category: exp
 ipr: trust200902
 area: Transport
 workgroup: (none)
-keyword: [QUIC, UDP, transport, experimental]
+keyword: Internet-Draft
 author:
-  - name: Linda Briesemeister
+  - ins: L. Briesemeister
+    name: Linda Briesemeister
     org: SRI International
     street: 333 Ravenswood Ave
     city: Menlo Park
@@ -17,8 +18,6 @@ author:
     country: USA
     email: linda.briesemeister@sri.com
 normative:
-  RFC2119: RFC2119
-  RFC8174: RFC8174
   RFC8999: RFC8999
   RFC9000: RFC9000
   RFC9002: RFC9002
@@ -26,23 +25,22 @@ informative:
   RFC9001: RFC9001
   RFC9221: RFC9221
   RFC9368: RFC9368
----
 
-{::boilerplate bcp14}
-
-# Abstract
+--- abstract
 
 QUIC-LY is an experimental variant of QUIC intended for controlled environments where both endpoints are managed by a single operator and no confidentiality is required. QUIC-LY removes TLS-based packet protection and replaces the QUIC/TLS handshake with a concise, 1-RTT transport setup using a small CONFIG/CONFIG-ACK exchange. QUIC-LY preserves QUIC’s transport benefits (multiplexed streams, flow control, loss recovery, connection migration) while operating entirely in cleartext. QUIC-LY is not intended for the public Internet.
 
+--- middle
+
 # Introduction
 
-QUIC {{RFC9000}} couples a transport protocol with TLS 1.3 {{RFC9001}} for key establishment and packet protection. QUIC-LY is a deliberately simplified variant intended for closed, trusted deployments where encryption is unnecessary and endpoints are under common control. QUIC-LY removes TLS, disables packet and header protection, and introduces a compact transport parameter exchange (CONFIG/CONFIG-ACK) to reach steady state in one round trip.
+QUIC {{RFC9000}} couples a transport protocol with TLS 1.3 {{RFC9001}} for key establishment and packet protection. QUIC-LY is a deliberately simplified variant intended for closed, trusted deployments where encryption is unnecessary and endpoints are under common control. QUIC-LY removes TLS, disables packet and header protection, and introduces a compact transport parameter exchange (CONFIG/CONFIG-ACK) to reach steady state in one round trip.
 
 QUIC-LY retains QUIC’s invariants {{RFC8999}}, stream and flow control mechanisms, loss recovery {{RFC9002}}, and connection migration capability, unless otherwise stated. QUIC-LY is not suitable for deployment on the open Internet.
 
 # Conventions and Terminology
 
-The key words “MUST”, “MUST NOT”, “REQUIRED”, “SHALL”, “SHALL NOT”, “SHOULD”, “SHOULD NOT”, “RECOMMENDED”, “NOT RECOMMENDED”, “MAY”, and “OPTIONAL” in this document are to be interpreted as described in BCP 14 {{RFC2119}} {{RFC8174}} when, and only when, they appear in all capitals, as shown here.
+The key words “MUST”, “MUST NOT”, “REQUIRED”, “SHALL”, “SHALL NOT”, “SHOULD”, “SHOULD NOT”, “RECOMMENDED”, “NOT RECOMMENDED”, “MAY”, and “OPTIONAL” in this document are to be interpreted as described in BCP 14 when, and only when, they appear in all capitals, as shown here.
 
 Terminology otherwise follows QUIC Transport {{RFC9000}}.
 
@@ -50,7 +48,7 @@ Terminology otherwise follows QUIC Transport {{RFC9000}}.
 
 QUIC-LY establishes a connection in one round trip, without TLS:
 
-* Client sends an Initial packet using QUIC-LY’s version with a CONFIG frame (optional) and PADDING to reach a configured size (Section {{packet-types-and-headers}}).
+* Client sends an Initial packet using QUIC-LY’s version with a CONFIG frame (optional) and padding to reach a configured size (Section {{packet-types-and-headers}}).
 * Server responds with ACK (for the Initial) and CONFIG-ACK (if needed). Both endpoints then consider the connection established and proceed with Short Header packets.
 
 The CONFIG/CONFIG-ACK exchange carries a compact set of transport parameters using TLVs. Operators MAY omit CONFIG entirely and rely on prearranged defaults.
@@ -79,7 +77,7 @@ By default, a client Initial pads the UDP payload to at least 1200 bytes. QUIC-L
 
 ## Allowed/Disallowed Frames
 
-Allowed: STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAMS, MAX_STREAM_DATA, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED, PADDING, ACK/ACK_ECN, CONNECTION_CLOSE, APPLICATION_CLOSE (if used), NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_CHALLENGE, PATH_RESPONSE, DATAGRAM (if supported) {{RFC9221}}.
+Allowed: STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAMS, MAX_STREAM_DATA, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED, PADDING, ACK/ACK_ECN, CONNECTION_CLOSE, NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, PATH_CHALLENGE, PATH_RESPONSE, DATAGRAM (if supported) {{RFC9221}}.
 
 Disallowed: CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, early-data related frames.
 
@@ -139,7 +137,7 @@ initial_padding_target = 1200; disable_active_migration = absent (false).
 **Client → Server (Initial):**
 
 * Long Header, Version = `0x51554c59`.
-* Frames: CONFIG (optional), application STREAM data (optional), PADDING to reach the configured target.
+* Frames: CONFIG (optional), application STREAM data (optional), padding to reach the configured target.
 
 **Server → Client (First Response):**
 
@@ -167,7 +165,7 @@ QUIC-LY adopts the algorithms and timers of {{RFC9002}}. ACK generation, ACK del
 
 # Error Handling
 
-QUIC-LY reuses QUIC Transport error codes where applicable. The following additional error codes are defined for APPLICATION_CLOSE or CONNECTION_CLOSE, encoded as QUIC varints:
+QUIC-LY reuses QUIC Transport error codes where applicable. The following additional error codes are defined for CONNECTION_CLOSE (and potentially application close), encoded as QUIC varints:
 
 * `QUICLY_MALFORMED_CONFIG (0xface01)`: The CONFIG or CONFIG-ACK frame is not well-formed or violates encoding rules.
 * `QUICLY_UNSUPPORTED_PARAM (0xface02)`: A required parameter is unsupported by the peer.
@@ -192,8 +190,6 @@ QUIC-LY packets are plaintext. Standard operational tools (e.g., flow logs, pack
 
 ## Normative References
 
-* {{RFC2119}} 
-* {{RFC8174}}
 * {{RFC8999}}
 * {{RFC9000}}
 * {{RFC9002}}

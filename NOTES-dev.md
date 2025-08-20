@@ -55,8 +55,14 @@ See also for GitHub Actions integration: https://github.com/ethho/poetry-demo
 ## Generating Documentation
 
 To generate the TXT and HTML versions of the specification (in Markdown) locally, use `make` after installing 
-required tooling .  Our GitHub automation also creates this online upon merges on `main`.
+required tooling per example below.  Our GitHub automation also creates this online upon merges on `main`.
 
+```bash
+gem install kramdown-rfc2629  # assuming modern Ruby installed; otherwise `brew install ruby`
+brew install xml2rfc
+make
+# -> draft-sri-quicly.xml, draft-sri-quicly.txt, draft-sri-quicly.html
+```
 
 ## Troubleshooting
 

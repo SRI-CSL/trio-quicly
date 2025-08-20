@@ -1,14 +1,21 @@
 DRAFT=draft-sri-quicly
 SRC=quicly_specification.md
 XML=$(DRAFT).xml
+TXT=$(DRAFT).txt
+HTML=$(DRAFT).html
 
-all: $(DRAFT).txt $(DRAFT).html
+.PHONY: all clean clobber
+all: $(TXT) $(HTML)
 
 $(XML): $(SRC)
-	kramdown-rfc2629 $< > $@
+	@set -euo pipefail; tmp="$@.tmp"; \
+	kramdown-rfc --v3 $< > "$$tmp"; test -s "$$tmp"; mv "$$tmp" "$@"
 
-$(DRAFT).txt $(DRAFT).html: $(XML)
+$(TXT) $(HTML): $(XML)
 	xml2rfc --text --html $<
 
 clean:
-	rm -f $(XML) $(DRAFT).txt $(DRAFT).html
+	rm -f $(XML) $(TXT) $(HTML)
+
+clobber: clean
+	git clean -fdx

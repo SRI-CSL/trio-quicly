@@ -9,6 +9,7 @@
 /dist
 /docs/_build
 .tox
+draft-sri-quicly.*
 
 # Environments
 .env
