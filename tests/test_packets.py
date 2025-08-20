@@ -41,7 +41,7 @@ def test_pkt_number_decoding():
 
 def check_long_header(packet: bytes, expected_length: int, expected_dcid: bytes, expected_scid: bytes):
     assert len(packet) == expected_length
-    assert QuicProtocolVersion.VERSION_1 == int.from_bytes(packet[1:5])
+    assert QuicProtocolVersion.QUICLY == int.from_bytes(packet[1:5])
     assert expected_dcid == packet[6:13]
     assert expected_scid == packet[14:18]
 
@@ -49,7 +49,7 @@ def test_ver_neg_pkt():
     silly_version = int.from_bytes(bytes.fromhex("aa bb cc dd"))
     ver_neg_pkt = create_quic_packet(QuicPacketType.VERSION_NEGOTIATION, sample_dcid,
                                      source_cid=sample_scid,
-                                     supported_versions=[QuicProtocolVersion.VERSION_1,
+                                     supported_versions=[QuicProtocolVersion.QUICLY,
                                                          silly_version])
     first_byte = ver_neg_pkt.encode_first_byte()
     assert "10000000" == f"{first_byte:08b}"  # first bit == 1
@@ -59,11 +59,11 @@ def test_ver_neg_pkt():
     assert QuicProtocolVersion.NEGOTIATION == int.from_bytes(packet[1:5])
     assert sample_dcid == packet[6:13]
     assert sample_scid == packet[14:18]
-    assert QuicProtocolVersion.VERSION_1 == int.from_bytes(packet[18:22])
+    assert QuicProtocolVersion.QUICLY == int.from_bytes(packet[18:22])
 
     decoded_pkt, consumed = VersionNegotiationPacket.decode_all_bytes(packet)
     assert len(decoded_pkt.supported_versions) == 2
-    assert QuicProtocolVersion.VERSION_1 == decoded_pkt.supported_versions[0]
+    assert QuicProtocolVersion.QUICLY == decoded_pkt.supported_versions[0]
     assert silly_version == decoded_pkt.supported_versions[1]
 
     # adding 2 extra bytes at end that should be safely ignored:
@@ -135,7 +135,7 @@ def test_initial_packets():
 
     # adding some padding of NUL bytes at the end
     decoded_pkt, consumed = decode_quic_packet(
-        bytes.fromhex("c2 00 00 00 01 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 01 00 00 00 00 00"))
+        bytes.fromhex("c2 51 55 4c 59 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 01 00 00 00 00 00"))
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.is_long_header
     assert decoded_pkt.packet_type == QuicPacketType.INITIAL
@@ -174,7 +174,7 @@ def test_quic_packets():
     decoded_pkt, consumed = decode_quic_packet(packet)
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.packet_type == QuicPacketType.HANDSHAKE
-    assert decoded_pkt.version == QuicProtocolVersion.VERSION_1
+    assert decoded_pkt.version == QuicProtocolVersion.QUICLY
     assert decoded_pkt.destination_cid == sample_dcid
     assert decoded_pkt.source_cid == sample_scid
     assert decoded_pkt.packet_number == packet_number
@@ -199,7 +199,7 @@ def test_retry_packets():
     decoded_pkt, consumed = decode_quic_packet(packet)
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.packet_type == QuicPacketType.RETRY
-    assert decoded_pkt.version == QuicProtocolVersion.VERSION_1
+    assert decoded_pkt.version == QuicProtocolVersion.QUICLY
     assert decoded_pkt.destination_cid == sample_dcid
     assert decoded_pkt.source_cid == sample_scid
     assert decoded_pkt.token == tkn

@@ -41,6 +41,7 @@ To run tests in development Python: `$ poetry run pytest`
 
 To run all tests in all supported Python versions, use `$ poetry run tox`
 See also: https://pytest-with-eric.com/automation/pytest-tox-poetry/#Step-by-step-guide-on-setting-up-a-project-with-these-tools
+
 TODO: add other test env's like "coverage"
 
 ## Building and Publishing

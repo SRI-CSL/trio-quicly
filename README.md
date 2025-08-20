@@ -46,7 +46,7 @@ QUIC v1 was standardized in May 2021 in [RFC 9000][_RFC 9000] and accompanied by
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - [Python Poetry](https://python-poetry.org/)
 
 ## Getting Started

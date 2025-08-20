@@ -103,7 +103,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         # TODO: how to communicate to Endpoint?
         # if self.endpoint.connections.get(self.remote_address) is self:
         #     del self.endpoint.connections[self.remote_address]
-        # Will wake any tasks waiting on self.q.r.receive() with a ClosedResourceError
+        # Will wake any tasks waiting on self.q.r.receive() with a ClosedResourceError:
         self.q.r.close()
 
     def __enter__(self) -> Self:

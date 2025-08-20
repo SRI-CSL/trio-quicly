@@ -37,7 +37,8 @@ def get_connection_id(data: bytes) -> tuple[bytes, int]:
 class QuicProtocolVersion(IntEnum):
     NEGOTIATION = 0
     VERSION_1 = 0x00000001
-    # VERSION_2 = 0x6B3343CF
+    VERSION_2 = 0x6b3343cf
+    QUICLY = 0x51554c59  # "QULY": Easy to read in Wireshark. Won’t collide with IETF or grease values.
 
 class QuicPacketType(IntEnum):
     INITIAL = 0
@@ -106,7 +107,7 @@ class LongHeaderPacket(QuicPacket):
     is_long_header: bool = field(default=True, init=False)
     packet_type: QuicPacketType = field(init=True)
 
-    version: int = field(default=QuicProtocolVersion.VERSION_1, init=False)
+    version: int = field(default=QuicProtocolVersion.QUICLY, init=False)
 
     source_cid: bytes = None  # source connection ID (0..20 Bytes)
 
@@ -193,7 +194,7 @@ class LongHeaderPacket(QuicPacket):
             raise ValueError(f"Packet type number {pkt_type_n} is not valid")
         packet_type = QuicPacketType(pkt_type_n)
 
-        assert int.from_bytes(data[1:5]) == QuicProtocolVersion.VERSION_1
+        assert int.from_bytes(data[1:5]) == QuicProtocolVersion.QUICLY
         dst_cid, offset = get_connection_id(data[5:])
         offset += 5
         src_cid, offset1 = get_connection_id(data[offset:])
