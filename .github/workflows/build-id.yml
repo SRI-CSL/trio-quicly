@@ -1,0 +1,62 @@
+name: Build I-D
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install tools
+        run: |
+          gem install kramdown-rfc2629
+          python -m pip install --upgrade pip
+          python -m pip install xml2rfc
+
+      - name: Build
+        run: |
+          kramdown-rfc2629 quicly_specification.md > draft-sri-quicly.xml
+          xml2rfc --text --html draft-sri-quicly.xml
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: |
+            draft-sri-quicly.html
+            draft-sri-quicly.txt
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
