@@ -54,7 +54,9 @@ See also for GitHub Actions integration: https://github.com/ethho/poetry-demo
 
 ## Generating Documentation
 
-TODO...
+To generate the TXT and HTML versions of the specification (in Markdown) locally, use `make` after installing 
+required tooling .  Our GitHub automation also creates this online upon merges on `main`.
+
 
 ## Troubleshooting
 
