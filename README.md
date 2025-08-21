@@ -15,7 +15,8 @@ It trims down the original QUIC protocol by removing TLS, reducing metadata, and
 **Reliable delivery, congestion control, and stream multiplexing — without the crypto baggage.**
 
 QUIC-LY is a simplified version of QUIC for educational and experimental purposes.  
-It omits encryption, focusing on core transport functionality.
+It omits encryption, focusing on core transport functionality. 
+Find the [QUIC-LY specification][_QUICLY spec] in IETF Draft notation.
 
 QUIC v1 was standardized in May 2021 in [RFC 9000][_RFC 9000] and accompanied by [RFC 9002][_RFC 9002] ("QUIC Loss Detection and Congestion Control").  
 
@@ -70,3 +71,4 @@ poetry run python examples/client.py
 [_Trio]: https://trio.readthedocs.io/en/stable/
 [_RFC 9000]: https://datatracker.ietf.org/doc/html/rfc9000
 [_RFC 9002]: https://datatracker.ietf.org/doc/html/rfc9002
+[_QUICLY spec]: https://sri-csl.github.io/trio-quicly/draft-sri-quicly.html

@@ -64,6 +64,10 @@ make
 # -> draft-sri-quicly.xml, draft-sri-quicly.txt, draft-sri-quicly.html
 ```
 
+Pushing changes to `main` generates this HTML rendering of the QUIC-LY specification:
+https://sri-csl.github.io/trio-quicly/draft-sri-quicly.html
+
+
 ## Troubleshooting
 
 Currently, updating minor versions of Python 3.x via Homebrew breaks `poetry` so we can reinstall using:
