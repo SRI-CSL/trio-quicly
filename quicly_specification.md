@@ -156,12 +156,14 @@ Encoding rules:
 Here, `PARAM_ID = 0x09` (`initial_padding_target`), and the integer `1200` is encoded as a QUIC varint.
 
 1) Encode `PARAM_ID`:
+
 ~~~
 PARAM_ID = 0x09 → 1‑byte varint → 0x09
 (bits: 00|001001)
 ~~~
 
 2) Encode `VALUE_LEN` (length of the VALUE field in bytes):
+
 ~~~
 varint(1200) uses 2 bytes → VALUE_LEN = 0x02
 (bits: 00|000010)
@@ -170,6 +172,7 @@ varint(1200) uses 2 bytes → VALUE_LEN = 0x02
 3) Encode `VALUE = varint(1200)`:
 - 1200 (0x04B0) fits in 14 bits ⇒ **2‑byte varint**
 - For a 2‑byte varint, the first byte is `01` followed by the high 6 bits; the second byte is the low 8 bits.
+
 ~~~
 high 6 bits = (1200 >> 8) & 0x3F = 0x04  → bits 000100
 low 8  bits = 1200 & 0xFF        = 0xB0  → bits 10110000
@@ -181,6 +184,7 @@ VALUE bytes: 0x44 0xB0
 ~~~
 
 4) **Resulting TLV bytes** (`PARAM_ID`, `VALUE_LEN`, `VALUE`):
+
 ~~~
 09 02 44 B0
 ~~~
@@ -188,10 +192,13 @@ VALUE bytes: 0x44 0xB0
 **CONFIG frame carrying just this single TLV**
 
 A CONFIG frame is:
+
 ~~~
 FRAME_TYPE (varint=0x3a) , LENGTH (varint) , TLV‑List
 ~~~
+
 With a single TLV of 4 bytes, `LENGTH = 0x04`.
+
 ~~~
 FRAME_TYPE = 0x3A
 LENGTH     = 0x04
@@ -201,6 +208,7 @@ CONFIG bytes: 3A 04 09 02 44 B0
 ~~~
 
 Flag example (`disable_active_migration = true`):
+
 ~~~
 PARAM_ID = 0x08 , VALUE_LEN = 0 → bytes: 08 00
 ~~~

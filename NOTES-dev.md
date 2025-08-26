@@ -58,7 +58,9 @@ To generate the TXT and HTML versions of the specification (in Markdown) locally
 required tooling per example below.  Our GitHub automation also creates this online upon merges on `main`.
 
 ```bash
-gem install kramdown-rfc2629  # assuming modern Ruby installed; otherwise `brew install ruby`
+gem install kramdown-rfc2629  # assuming modern Ruby installed; otherwise 
+                              # `brew install ruby; brew link --overwrite ruby [--force]`
+export PATH="$(ruby -e 'puts Gem.bindir'):$PATH"  # if `kramdown-rfc` command not found
 brew install xml2rfc
 make
 # -> draft-sri-quicly.xml, draft-sri-quicly.txt, draft-sri-quicly.html
