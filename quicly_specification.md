@@ -132,6 +132,80 @@ idle_timeout_ms = 30000; ack_delay_exponent = 3; max_ack_delay_ms = 25;
 initial_padding_target = 1200; disable_active_migration = absent (false).
 ~~~
 
+### TLV Encoding Details and Example
+
+A TLV is a compact **Type–Length–Value** item carried inside CONFIG / CONFIG-ACK. It is encoded as:
+
+~~~
+TLV = PARAM_ID (varint) , VALUE_LEN (varint) , VALUE (VALUE_LEN bytes)
+~~~
+
+Encoding rules:
+
+- `PARAM_ID` and integer `VALUE`s use **QUIC varints** (RFC 9000):
+  - `00` = 1‑byte varint (6‑bit value)
+  - `01` = 2‑byte varint (14‑bit value)
+  - `10` = 4‑byte varint (30‑bit value)
+  - `11` = 8‑byte varint (62‑bit value)
+- Boolean/flag parameters set **`VALUE_LEN = 0`** to mean **true**; absence means false.
+- Unknown `PARAM_ID`s **MUST** be ignored (skipped using `VALUE_LEN`).
+- If a parameter appears multiple times, the **last occurrence wins**.
+
+**Example: `initial_padding_target = 1200`**
+
+Here, `PARAM_ID = 0x09` (`initial_padding_target`), and the integer `1200` is encoded as a QUIC varint.
+
+1) Encode `PARAM_ID`:
+~~~
+PARAM_ID = 0x09 → 1‑byte varint → 0x09
+(bits: 00|001001)
+~~~
+
+2) Encode `VALUE_LEN` (length of the VALUE field in bytes):
+~~~
+varint(1200) uses 2 bytes → VALUE_LEN = 0x02
+(bits: 00|000010)
+~~~
+
+3) Encode `VALUE = varint(1200)`:
+- 1200 (0x04B0) fits in 14 bits ⇒ **2‑byte varint**
+- For a 2‑byte varint, the first byte is `01` followed by the high 6 bits; the second byte is the low 8 bits.
+~~~
+high 6 bits = (1200 >> 8) & 0x3F = 0x04  → bits 000100
+low 8  bits = 1200 & 0xFF        = 0xB0  → bits 10110000
+
+first byte: 01|000100 = 0x44
+second byte:           0xB0
+
+VALUE bytes: 0x44 0xB0
+~~~
+
+4) **Resulting TLV bytes** (`PARAM_ID`, `VALUE_LEN`, `VALUE`):
+~~~
+09 02 44 B0
+~~~
+
+**CONFIG frame carrying just this single TLV**
+
+A CONFIG frame is:
+~~~
+FRAME_TYPE (varint=0x3a) , LENGTH (varint) , TLV‑List
+~~~
+With a single TLV of 4 bytes, `LENGTH = 0x04`.
+~~~
+FRAME_TYPE = 0x3A
+LENGTH     = 0x04
+TLV‑List   = 09 02 44 B0
+
+CONFIG bytes: 3A 04 09 02 44 B0
+~~~
+
+Flag example (`disable_active_migration = true`):
+~~~
+PARAM_ID = 0x08 , VALUE_LEN = 0 → bytes: 08 00
+~~~
+
+
 # Connection Establishment (1-RTT Setup)
 
 **Client → Server (Initial):**
