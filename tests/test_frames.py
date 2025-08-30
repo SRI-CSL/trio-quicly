@@ -5,10 +5,9 @@
 import random
 from copy import deepcopy
 
-from quicly.crypto import decode_var_length_int
 from quicly.exceptions import QuicConnectionError
-from quicly.frame import encode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, CryptoFrame, \
-    NewTokenFrame, StreamFrame, MaxDataFrame, MaxStreamData, StopSendingFrame, MaxStreamsBidiFrame, MaxStreamsUniFrame, \
+from quicly.frame import encode_var_length_int, decode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, \
+    StreamFrame, MaxDataFrame, MaxStreamData, StopSendingFrame, MaxStreamsBidiFrame, MaxStreamsUniFrame, \
     DataBlockedFrame, StreamsBlockedBidiFrame, StreamsBlockedUniFrame, RetireConnectionIDFrame, StreamDataBlockedFrame, \
     ConnectionCloseFrame, NewConnectionIDFrame, parse_all_quic_frames
 
@@ -49,13 +48,6 @@ def test_no_content():
     frame, offset = QuicFrame.decode(bytes.fromhex("01"))
     assert offset == 1
     assert frame.frame_type == QuicFrameType.PING
-    assert frame.content is None
-
-    with pytest.raises(ValueError):
-        QuicFrame(QuicFrameType.HANDSHAKE_DONE, content=b'not allowed')
-    frame, offset = QuicFrame.decode(bytes.fromhex("1e"))
-    assert offset == 1
-    assert frame.frame_type == QuicFrameType.HANDSHAKE_DONE
     assert frame.content is None
 
 def assert_ack_delay_equal(expected: int, actual: int, exponent: int = 3):
@@ -259,53 +251,6 @@ def test_quic_ack_and_ack_ecn_round_trip():
     assert decoded_ecn.content.first_ack_range == 5
     assert len(decoded_ecn.content.ack_ranges) == 2
     assert decoded_ecn.content.ecn_counts == ECNCounts(ect0=10, ect1=20, ce=30)
-
-def test_crypto_frame_round_trip():
-    crypto_data = b'\x01\x02\x03\x04hello world'
-    data_offset = 42
-
-    frame = CryptoFrame(
-        data_offset=data_offset,
-        crypto_data=crypto_data,
-    )
-    encoded = frame.encode()
-    decoded, consumed = CryptoFrame.decode(encoded)
-
-    assert consumed == len(encoded)
-    assert decoded.data_offset == data_offset
-    assert decoded.crypto_data == crypto_data
-    assert decoded.data_length == len(crypto_data)
-
-def test_quic_crypto_frame_round_trip():
-    crypto_data = b"\x01\x02\x03\x04securecrypto"
-    data_offset = 77
-
-    frame = QuicFrame(
-        frame_type=QuicFrameType.CRYPTO,
-        content=CryptoFrame(data_offset=data_offset, crypto_data=crypto_data)
-    )
-    encoded = frame.encode()
-    decoded, consumed = QuicFrame.decode(encoded)
-
-    assert consumed == len(encoded)
-    assert decoded.frame_type == QuicFrameType.CRYPTO
-    assert isinstance(decoded.content, CryptoFrame)
-    assert decoded.content.data_offset == data_offset
-    assert decoded.content.crypto_data == crypto_data
-
-def test_new_token_frame_round_trip():
-    token = b'sample-token-12345'
-    frame = QuicFrame(
-        frame_type=QuicFrameType.NEW_TOKEN,
-        content=NewTokenFrame(token=token)
-    )
-    encoded = frame.encode()
-    decoded, consumed = QuicFrame.decode(encoded)
-    assert consumed == len(encoded)
-    assert decoded.frame_type == QuicFrameType.NEW_TOKEN
-    assert isinstance(decoded.content, NewTokenFrame)
-    assert decoded.content.token == token
-    assert decoded.content.token_length == len(token)
 
 def test_stream_frame_flag_combinations():
     from itertools import product
@@ -548,3 +493,6 @@ def test_iterating_frames():
     assert len(frames) == 3
     assert frames[1].frame_type == QuicFrameType.MAX_DATA
     assert consumed == 4
+
+def test_config_frames():
+    pass

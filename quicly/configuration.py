@@ -2,9 +2,87 @@
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import *
 
 SMALLEST_MAX_DATAGRAM_SIZE = 1200
+
+# === QUIC-LY Transport Parameters (CONFIG / CONFIG-ACK) =====================
+class TransportParameterType(IntEnum):
+    INITIAL_MAX_DATA             = 0x01  # bytes
+    INITIAL_MAX_STREAM_DATA_BIDI = 0x02  # bytes
+    INITIAL_MAX_STREAMS_BIDI     = 0x03  # count
+    MAX_UDP_PAYLOAD_SIZE         = 0x04  # bytes
+    IDLE_TIMEOUT_MS              = 0x05  # ms
+    ACK_DELAY_EXPONENT           = 0x06  # —
+    MAX_ACK_DELAY_MS             = 0x07  # ms
+    DISABLE_ACTIVE_MIGRATION     = 0x08  # flag (VALUE_LEN=0 => true)
+    INITIAL_PADDING_TARGET       = 0x09  # bytes
+
+    def __str__(self):
+        return self.name.lower()
+
+PARAM_SCHEMA: dict[TransportParameterType, tuple[str, Callable[[int|bool], int|bool]]] = {
+    TransportParameterType.INITIAL_MAX_DATA:             ("initial_max_data", int),
+    TransportParameterType.INITIAL_MAX_STREAM_DATA_BIDI: ("initial_max_stream_data_bidi", int),
+    TransportParameterType.INITIAL_MAX_STREAMS_BIDI:     ("initial_max_streams_bidi", int),
+    TransportParameterType.MAX_UDP_PAYLOAD_SIZE:         ("max_udp_payload_size", int),
+    TransportParameterType.IDLE_TIMEOUT_MS:              ("idle_timeout_ms", int),
+    TransportParameterType.ACK_DELAY_EXPONENT:           ("ack_delay_exponent", int),
+    TransportParameterType.MAX_ACK_DELAY_MS:             ("max_ack_delay_ms", int),
+    TransportParameterType.DISABLE_ACTIVE_MIGRATION:     ("disable_active_migration", lambda v: bool(v)),
+    TransportParameterType.INITIAL_PADDING_TARGET:       ("initial_padding_target", int),
+}
+
+# Defaults per QUIC-LY spec (recommended when CONFIG/CONFIG-ACK empty)
+QUICLY_DEFAULTS: Dict[TransportParameterType, int | bool] = {
+    TransportParameterType.INITIAL_MAX_DATA:             1_048_576,
+    TransportParameterType.INITIAL_MAX_STREAM_DATA_BIDI:   262_144,
+    TransportParameterType.INITIAL_MAX_STREAMS_BIDI:             8,
+    TransportParameterType.MAX_UDP_PAYLOAD_SIZE:              1350,
+    TransportParameterType.IDLE_TIMEOUT_MS:                  30000,
+    TransportParameterType.ACK_DELAY_EXPONENT:                   3,
+    TransportParameterType.MAX_ACK_DELAY_MS:                    25,
+    TransportParameterType.DISABLE_ACTIVE_MIGRATION:         False,
+    TransportParameterType.INITIAL_PADDING_TARGET:            1200,
+}
+
+@dataclass
+class QuicLyTransportParameters:
+    """Strongly-typed view over transport params with QUIC-LY defaults."""
+    initial_max_data: int             = QUICLY_DEFAULTS[TransportParameterType.INITIAL_MAX_DATA]             # bytes
+    initial_max_stream_data_bidi: int = QUICLY_DEFAULTS[TransportParameterType.INITIAL_MAX_STREAM_DATA_BIDI] # bytes
+    initial_max_streams_bidi: int     = QUICLY_DEFAULTS[TransportParameterType.INITIAL_MAX_STREAMS_BIDI]     # count
+    max_udp_payload_size: int         = QUICLY_DEFAULTS[TransportParameterType.MAX_UDP_PAYLOAD_SIZE]         # bytes
+    idle_timeout_ms: int              = QUICLY_DEFAULTS[TransportParameterType.IDLE_TIMEOUT_MS]              # ms
+    ack_delay_exponent: int           = QUICLY_DEFAULTS[TransportParameterType.ACK_DELAY_EXPONENT]
+    max_ack_delay_ms: int             = QUICLY_DEFAULTS[TransportParameterType.MAX_ACK_DELAY_MS]             # ms
+    disable_active_migration: bool    = QUICLY_DEFAULTS[TransportParameterType.DISABLE_ACTIVE_MIGRATION]     # flag
+    initial_padding_target: int       = QUICLY_DEFAULTS[TransportParameterType.INITIAL_PADDING_TARGET]       # bytes
+
+    def as_dict(self, include_defaults: bool = False) -> dict[str, int|bool]:
+        return {f: getattr(self, f) for pid, (f, _) in PARAM_SCHEMA.items()
+                if include_defaults or QUICLY_DEFAULTS[pid] != getattr(self, f)}
+
+    def as_list(self, exclude_defaults: bool = False) -> list[tuple[int, int|bool]]:
+        """
+        Create a list view of transport parameters. If `exclude_defaults` is `True`, only those parameters different
+        from defaults are included.
+        :param exclude_defaults: Whether to exclude parameters with default values or not.
+        :return: list of tuples of transport parameter names and their current values.
+        """
+        return [(pid, getattr(self, f)) for pid, (f, _) in PARAM_SCHEMA.items()
+                if not exclude_defaults or QUICLY_DEFAULTS[pid] != getattr(self, f)]
+
+    def update(self, new_params: dict[str, int|bool]) -> None:
+        """
+        Update the QUIC-LY default transport parameters in place.
+        :param new_params: Dictionary of transport parameter names and their new values.
+        :return: None
+        """
+        for p_name, p_value in new_params.items():
+            setattr(self, p_name, p_value)
 
 @dataclass
 class QuicConfiguration:
@@ -28,3 +106,10 @@ class QuicConfiguration:
     """
     The maximum QUIC payload size in bytes to send, excluding UDP or IP overhead.
     """
+
+    transport_parameters: QuicLyTransportParameters = field(default_factory=QuicLyTransportParameters)
+    """
+    QUIC-LY default transport parameters.
+    """
+
+    source_cid: bytes = None

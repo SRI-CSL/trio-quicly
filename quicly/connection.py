@@ -2,16 +2,28 @@
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
+from enum import Enum, auto
 import secrets
 import trio
 from types import TracebackType
 from typing import *
 
-from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE
-from .frame import QuicFrame, QuicFrameType, CryptoFrame
+from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE, PARAM_SCHEMA
+from .frame import QuicFrame, QuicFrameType, ConfigFrame, TransportParameter
 from .packet import create_quic_packet, QuicPacketType, LongHeaderPacket, \
-    MAX_UDP_PACKET_SIZE, decode_udp_packet
+    MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicProtocolVersion
 from .utils import _Queue, AddressFormat
+
+class ConnectionState(Enum):
+    # client-only
+    START = auto()
+    WAIT_FIRST = auto()
+    # server-only
+    LISTEN = auto()
+    # shared
+    ESTABLISHED = auto()
+    CLOSING = auto()
+    DRAINING = auto()
 
 # @final
 # TODO: first approximation is to simply match 1 QUIC connection without handshake to 1 QUIC bidi stream
@@ -59,9 +71,14 @@ class SimpleQuicConnection(trio.abc.Stream):
         else:
             assert self.remote_address is not None
 
+        # state management:
         self._closed = False
-        self._did_handshake = False
+        self._did_handshake = False  # after successful handshake, connection is ESTABLISHED
         self._handshake_lock = trio.Lock()  # guard handshake TODO: move to Stream?  No, as handshake is per connection!
+        self.state = ConnectionState.START if self._is_client else ConnectionState.LISTEN
+        self.draining_until = None
+        self._closing_frame = None
+        self._saw_ack_eliciting = False  # touched during closing to decide if/when to re-send close
 
         self.q = _Queue[bytes](incoming_packets_buffer)
 
@@ -103,6 +120,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         # TODO: how to communicate to Endpoint?
         # if self.endpoint.connections.get(self.remote_address) is self:
         #     del self.endpoint.connections[self.remote_address]
+
         # Will wake any tasks waiting on self.q.r.receive() with a ClosedResourceError:
         self.q.r.close()
 
@@ -126,24 +144,22 @@ class SimpleQuicConnection(trio.abc.Stream):
         await trio.lowlevel.checkpoint()
 
     def init_handshake(self) -> bytes:
-        # The client has not yet received a connection ID chosen by the server. Instead, it uses this field to
-        # provide the 8 bytes of random data for deriving Initial encryption keys.
-        # TODO: keep track in connection status:
-        self.configuration.initial_random = secrets.token_bytes(8)
         self.configuration.source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be only 5 bytes
-        client_hello_frame = QuicFrame(QuicFrameType.CRYPTO, content=
-                                       CryptoFrame(0, b'ClientHello TLS Record'))
+        ts = [TransportParameter(*tp) for tp in self.configuration.transport_parameters.as_list(exclude_defaults=True)]
+        client_config_frame = QuicFrame(QuicFrameType.CONFIG,
+                                        content=ConfigFrame(ts))
         client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
-                                                destination_cid=self.configuration.initial_random,
+                                                destination_cid=secrets.token_bytes(8),
                                                 source_cid=self.configuration.source_cid,
                                                 packet_number=0,  # TODO: keep track in connection status
-                                                payload=[client_hello_frame])  # TODO: TLS ClientHello etc. payload
+                                                payload=[client_config_frame])
         # Any datagram sent by the client that contains an Initial packet must be padded to a length of
-        #  1200 bytes. This library does it by appending nul bytes to the datagram.
-        return client_initial_pkt.encode_all_bytes().ljust(SMALLEST_MAX_DATAGRAM_SIZE, b'\x00')
+        # INITIAL_PADDING_TARGET bytes. This library does it by appending nul bytes to the datagram.
+        return client_initial_pkt.encode_all_bytes().ljust(
+            self.configuration.transport_parameters.initial_padding_target, b'\x00')
 
     async def do_handshake(self, hello_payload: bytes, *, initial_retransmit_timeout: float = 1.0,
-                           stream_payload: bytes = None) -> bool:
+                           data_payload: bytes = None) -> bytes:
         """Perform the handshake.
 
         It's safe to call this multiple times, or call it simultaneously from multiple
@@ -152,8 +168,8 @@ class SimpleQuicConnection(trio.abc.Stream):
         Args:
 
           hello_payload (bytes): this encodes the INITIAL QuicPacket; if we are the
-            client side, then the initial key material etc. should already be generated
-            and match the payload.  TODO: how to react if it doesn't match?
+            client side, then the initial connection ID should match the payload.
+            TODO: how to react if it doesn't match?
             If we are the server, then are about to respond with our INITIAL QuicPacket.
           initial_retransmit_timeout (float): Since UDP is an unreliable protocol, it's
             possible that some of the packets we send during the handshake will get
@@ -167,141 +183,96 @@ class SimpleQuicConnection(trio.abc.Stream):
             This is the *initial* timeout, because if packets keep being lost then Trio
             will automatically back off to longer values, to avoid overloading the
             network.
-          stream_payload: Optional stream payload to be sent with last handshake packet.
+          data_payload: Optional stream or datagram payload to be sent with initial packet.
             Only useful from client side as it will be ignored from the server side.
+            TODO: what does this mean for QUIC-LY? Can't we already initiate with STREAM (or DATAGRAM) payload?
 
         """
-        async with ((self._handshake_lock)):
+        async with (self._handshake_lock):  # TODO: check await's under this for blocking this top-level with()
             if self._did_handshake:
                 return True
 
-            # TODO: perform actual QUIC handshake (implementing TLS 1.3 etc.)
+            # TODO: turn assertion errors into PROTOCOL_VIOLATION, QLog, and False return values...
             if self._is_client:
-                # # The client has not yet received a connection ID chosen by the server. Instead, it uses this field to
-                # # provide the 8 bytes of random data for deriving Initial encryption keys.
-                # initial_random = secrets.token_bytes(8)
-                # source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be randomly chosen 5 bytes
-                # client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
-                #                                         destination_cid=initial_random,
-                #                                         source_cid=source_cid,
-                #                                         packet_number=0,
-                #                                         payload=bytes.fromhex("ff")) # TODO: TLS ClientHello etc. payload
-                # # Any datagram sent by the client that contains an Initial packet must be padded to a length of
-                # #  1200 bytes. This library does it by appending nul bytes to the datagram.
-                # await self.send_all(client_initial_pkt.encode_all_bytes().ljust(SMALLEST_MAX_DATAGRAM_SIZE, b'\x00'))
-                #
-                # # awaiting first response from new connections queue:
-                # (payload, remote_address) = await self.endpoint.new_connections_q.r.receive()
-                # self.remote_address = remote_address
-
                 hello_packets = list(decode_udp_packet(hello_payload))
-                assert len(hello_packets) == 2
+                assert len(hello_packets) == 1  # TODO: Could there be more QUIC packets?  I think so...
 
                 server_initial_pkt = hello_packets[0]
                 assert isinstance(server_initial_pkt, LongHeaderPacket)
                 assert server_initial_pkt.packet_type == QuicPacketType.INITIAL
                 assert server_initial_pkt.packet_number == 0
-                assert server_initial_pkt.destination_cid == self.configuration.source_cid  # TODO: turn into status
-                # TODO: signal endpoint that this packet validated?
+                assert server_initial_pkt.destination_cid == self.configuration.source_cid  # TODO: turn into status?
+                self.configuration.destination_cid = server_initial_pkt.source_cid
+                assert len(server_initial_pkt.payload) > 0
 
-                server_handshake_pkt = hello_packets[1]
-                assert isinstance(server_handshake_pkt, LongHeaderPacket)
-                assert server_handshake_pkt.packet_type == QuicPacketType.HANDSHAKE
-                assert server_handshake_pkt.packet_number == 0
+                # find last CONFIG_ACK frame in payload:
+                last_cfg_ack = next((f for f in reversed(server_initial_pkt.payload)
+                                     if f.frame_type == QuicFrameType.CONFIG_ACK), None)
+                assert last_cfg_ack is not None
+                assert isinstance(last_cfg_ack.content, ConfigFrame)
+                server_params = {PARAM_SCHEMA[tp.param_id][0]: tp.value
+                                 for tp in last_cfg_ack.content.transport_parameters}
+                self.configuration.transport_parameters.update(server_params)
 
-                udp_payload = await self.q.r.receive()
-                server_handshake_pkt = next(decode_udp_packet(udp_payload))
-                assert isinstance(server_handshake_pkt, LongHeaderPacket)
-                assert server_handshake_pkt.packet_type == QuicPacketType.HANDSHAKE
-                assert server_handshake_pkt.packet_number == 1
+                # TODO: parse out ACK frames?
+                # TODO: signal endpoint that this packet validated??
 
-                # UDP Datagram 4 = ACKs: INITIAL, HANDSHAKE, and PADDING
-                client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
-                                                        destination_cid=server_handshake_pkt.source_cid,
-                                                        source_cid=server_handshake_pkt.destination_cid,
-                                                        packet_number=1,
-                                                        payload=[QuicFrame(QuicFrameType.PADDING)]).encode_all_bytes()  # TODO NEXT: ACK Frame
-                client_handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE,
-                                                          destination_cid=server_handshake_pkt.source_cid,
-                                                          source_cid=server_handshake_pkt.destination_cid,
-                                                          packet_number=0,
-                                                          payload=[QuicFrame(QuicFrameType.PADDING)]).encode_all_bytes()  # TODO NEXT: ACK Frame
-                # Any datagram sent by the client that contains an Initial packet must be padded to a length of
-                #  1200 bytes. This library does it by appending nul bytes to the datagram.
-                await self.send_all(client_initial_pkt +
-                                    client_handshake_pkt.ljust(SMALLEST_MAX_DATAGRAM_SIZE - len(client_initial_pkt), b'\x00'))
-
-                # TODO: UDP Datagram 5 = Client handshake finished, "ping"
-                #  The client sends a "Handshake" packet, containing the client's "Handshake Finished" TLS record,
-                #  completing the handshake process.
-                client_handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE,
-                                                          destination_cid=server_handshake_pkt.source_cid,
-                                                          source_cid=server_handshake_pkt.destination_cid,
-                                                          packet_number=1,
-                                                          payload=[QuicFrame(QuicFrameType.PADDING)]).encode_all_bytes()  # TODO NEXT: ACK Frame
-                if stream_payload:
-                    # client_stream_frame = QuicFrame(QuicFrameType.STREAM_BASE,
+                if data_payload:  # any STREAM or DATAGRAM payload to immediately send?
+                    # TODO: client_stream_frame = QuicFrame(QuicFrameType.STREAM_BASE,
                     #                                 content=StreamFrame(stream_id=0, data=stream_payload))
                     client_packet = create_quic_packet(QuicPacketType.ONE_RTT,
-                                                       destination_cid=server_handshake_pkt.source_cid,
+                                                       destination_cid=server_initial_pkt.source_cid,
                                                        spin_bit=False, key_phase=False,
                                                        packet_number=0,
-                                                       payload=[QuicFrame(QuicFrameType.PADDING)]).encode_all_bytes()  # TODO NEXT: STREAM frames
-                    await self.send_all(client_handshake_pkt + client_packet)
-                else:
-                    await self.send_all(client_handshake_pkt)
+                                                       payload=[QuicFrame(QuicFrameType.PADDING)])
+                    await self.send_all(client_packet.encode_all_bytes())
 
             else:  # server-side of handshake
                 # parse hello_payload as client initial packet:
                 client_initial_pkt = next(decode_udp_packet(hello_payload))
                 # NOTE: A server MUST discard an Initial packet that is carried in a UDP datagram with a payload that
-                # is smaller than the smallest allowed maximum datagram size of 1200 bytes. TODO: A server MAY also
+                # is smaller than the smallest allowed maximum datagram size of 1200 bytes.
+                # TODO: A server MAY also
                 #  immediately close the connection by sending a CONNECTION_CLOSE frame with an error code of
                 #  PROTOCOL_VIOLATION
                 if len(hello_payload) < SMALLEST_MAX_DATAGRAM_SIZE:
-                    # TODO: logging and
+                    # TODO: logging, sending CONN_CLOSE?
                     return False
                 assert isinstance(client_initial_pkt, LongHeaderPacket)
                 assert client_initial_pkt.packet_type == QuicPacketType.INITIAL
-                # TODO: if error then close this connection? self.close()
+                if client_initial_pkt.version != QuicProtocolVersion.QUICLY:
+                    # TODO: logging, error handling
+                    return False
+                # TODO: keep track of packet number...
+                self.configuration.destination_cid = client_initial_pkt.source_cid
+                assert len(client_initial_pkt.payload) > 0
 
-                source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be randomly chosen 5 bytes
+                # find last CONFIG frame in payload:
+                last_cfg = next((f for f in reversed(client_initial_pkt.payload)
+                                 if f.frame_type == QuicFrameType.CONFIG), None)
+                assert last_cfg is not None
+                assert isinstance(last_cfg.content, ConfigFrame)
+                # TODO: what are the semantics of receiving client parameters? Should they always override servers'?
+                client_params = {PARAM_SCHEMA[tp.param_id][0]: tp.value
+                                 for tp in last_cfg.content.transport_parameters}
+                self.configuration.transport_parameters.update(client_params)
+
+                # TODO: send CONFIG_ACK in response
+                self.configuration.source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be randomly chosen 5 bytes
+                ts = [TransportParameter(*tp) for tp in
+                      self.configuration.transport_parameters.as_list(exclude_defaults=True)]
+                server_config_frame = QuicFrame(QuicFrameType.CONFIG_ACK,
+                                                content=ConfigFrame(ts))
                 server_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
                                                         destination_cid=client_initial_pkt.source_cid,  # repeated back
-                                                        source_cid=source_cid,
-                                                        packet_number=0,
-                                                        payload=[QuicFrame(QuicFrameType.PADDING)]) # TODO NEXT: TLS ClientHello etc. payload
-                # TODO: The server follows up with a "Handshake" packet. This packet contains TLS 1.3 handshake
-                #  records from the server.
-                server_handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE,
-                                                        destination_cid=client_initial_pkt.source_cid,  # repeated back
-                                                        source_cid=source_cid,
-                                                        packet_number=0,
-                                                        payload=[QuicFrame(QuicFrameType.PADDING)]) # TODO NEXT: TLS ClientHello etc. payload
-                # INITIAL and first HANDSHAKE combined into 1 UDP Datagram:
-                await self.send_all(server_initial_pkt.encode_all_bytes() + server_handshake_pkt.encode_all_bytes())
+                                                        source_cid=self.configuration.source_cid,
+                                                        packet_number=0,  # TODO: keep track of this!
+                                                        payload=[server_config_frame])
+                # TODO: padding this one as well?
+                await self.send_all(server_initial_pkt.encode_all_bytes().ljust(
+                    self.configuration.transport_parameters.initial_padding_target, b'\x00'))
 
-                # TODO: The server continues with another "Handshake" packet. This packet contains the rest of the
-                #  server's TLS 1.3 handshake records.
-                #  NOTE: the second HANDSHAKE packet has number 1.  It should be sent in a 2nd UDP Datagram
-                server_handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE,
-                                                        destination_cid=client_initial_pkt.source_cid,  # repeated back
-                                                        source_cid=source_cid,
-                                                        packet_number=1,
-                                                        payload=[QuicFrame(QuicFrameType.PADDING)]) # TODO NEXT: TLS ClientHello etc. payload
-                await self.send_all(server_handshake_pkt.encode_all_bytes())
-
-                # TODO: obtain 3-4 packets (combined into 2 UDP Datagrams):
-                udp_payload = await self.q.r.receive()  # INITIAL, 1 and HANDSHAKE, 0
-                packets = list(decode_udp_packet(udp_payload))
-                assert len(packets) == 2
-                udp_payload = await self.q.r.receive()  # HANDSHAKE, 1 and [optional] APP, 0
-                packets = list(decode_udp_packet(udp_payload))
-                assert len(packets) <= 2
-                if len(packets) == 2:
-                    one_rtt_pkt = packets[1]
-                    stream_payload = one_rtt_pkt.payload  # TODO NEXT: forward payload from 2nd packet...
-
+            self.state = ConnectionState.ESTABLISHED
             self._did_handshake = True
             return True
 

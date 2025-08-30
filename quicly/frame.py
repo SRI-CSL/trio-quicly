@@ -4,15 +4,14 @@
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional, List, ClassVar
+from typing import *
 
-from .crypto import decode_var_length_int
+from .configuration import TransportParameterType, QUICLY_DEFAULTS
 from .exceptions import QuicConnectionError, QuicErrorCode
 
 
 # QUIC Frame
-# : The payload of QUIC Packets, after removing packet protection, consists of a sequence of complete frames. Some
-# Packet types (Version Negotiation, Stateless Reset, and Retry) do not contain Frames.
+# : The payload of QUIC Packets consists of a sequence of complete frames.
 #
 # The payload of a packet that contains frames MUST contain at least one frame, and MAY contain multiple frames and
 # multiple frame types. An endpoint MUST treat receipt of a packet containing no frames as a connection error of type
@@ -20,8 +19,8 @@ from .exceptions import QuicConnectionError, QuicErrorCode
 #
 # An endpoint MUST treat the receipt of a frame of unknown type as a connection error of type FRAME_ENCODING_ERROR.
 #
-# All frames are idempotent in this version of QUIC. That is, a valid frame does not cause undesirable side effects
-# or errors when received more than once.
+# All frames are idempotent in this version of QUIC. That is, a valid frame does not cause undesirable side effects or
+# errors when received more than once.
 
 def encode_var_length_int(value: int) -> bytes:
     """
@@ -45,6 +44,29 @@ def encode_var_length_int(value: int) -> bytes:
         value |= 0b11 << 62
         return value.to_bytes(8, "big")
 
+
+def decode_var_length_int(data: bytes, prior_offset: int = 0) -> tuple[int, int]:
+    """
+    Decode a variable length integer from a stream of bytes.
+
+    See: Appendix A - Sample Variable-Length Integer Decoding
+
+    :param prior_offset: will be added to the number of bytes used to facilitate more compact code when parsing bytes
+    :param data: single byte of data to be decoded
+    :return: a pair of decoded integer and length of bytes used for decoding (offset into original data)
+    """
+    # The length of variable-length integers is encoded in the first two bits of the first byte.
+    v = data[0]
+    prefix = v >> 6
+    length = 1 << prefix
+
+    # Once the length is known, remove these bits and read any remaining bytes.
+    v = v & 0x3f
+    for next_byte in data[1:length]:
+        v = (v << 8) + next_byte
+    return v, length + prior_offset
+
+
 class QuicFrameType(IntEnum):
     PADDING = 0x00
     PING = 0x01
@@ -52,8 +74,6 @@ class QuicFrameType(IntEnum):
     ACK_ECN = 0x03
     RESET_STREAM = 0x04
     STOP_SENDING = 0x05
-    CRYPTO = 0x06
-    NEW_TOKEN = 0x07
     STREAM_BASE = 0x08
     MAX_DATA = 0x10
     MAX_STREAM_DATA = 0x11
@@ -69,9 +89,12 @@ class QuicFrameType(IntEnum):
     PATH_RESPONSE = 0x1B
     TRANSPORT_CLOSE = 0x1C
     APPLICATION_CLOSE = 0x1D
-    HANDSHAKE_DONE = 0x1E
+    # once we support DATAGRAMs (see https://www.rfc-editor.org/rfc/rfc9221.html)
     # DATAGRAM = 0x30
     # DATAGRAM_WITH_LENGTH = 0x31
+    # # QUIC-LY frame types:
+    CONFIG = 0x3a
+    CONFIG_ACK = 0x3b
 
     def __str__(self):
         friendly_names = {
@@ -81,8 +104,6 @@ class QuicFrameType(IntEnum):
             self.ACK_ECN: "ACK Frame with ECN",
             self.RESET_STREAM: "Reset Stream Frame",
             self.STOP_SENDING: "Stop Sending Frame",
-            self.CRYPTO: "Crypto Frame",
-            self.NEW_TOKEN: "New Token Frame",
             self.STREAM_BASE: "Stream Frame (Base Type)",
             self.MAX_DATA: "Max Data Frame",
             self.MAX_STREAM_DATA: "Max Stream Data Frame",
@@ -98,9 +119,13 @@ class QuicFrameType(IntEnum):
             self.PATH_RESPONSE: "Path Response Frame",
             self.TRANSPORT_CLOSE: "Transport Close Frame",
             self.APPLICATION_CLOSE: "Application Close Frame",
-            self.HANDSHAKE_DONE: "Handshake Done Frame"
+            # self.DATAGRAM: "Datagram Frame",
+            # self.DATAGRAM_WITH_LENGTH: "Datagram With Length Frame",
+            self.CONFIG: "Config Frame",
+            self.CONFIG_ACK: "Config ACK Frame",
         }
         return friendly_names.get(self, f"Unknown Frame (0x{self.value:02x})")
+
 
 NON_ACK_ELICITING_FRAME_TYPES = frozenset(
     [
@@ -128,6 +153,7 @@ PROBING_FRAME_TYPES = frozenset(
     ]
 )
 
+
 @dataclass
 class FrameSubtype:
     def encode(self) -> bytes:
@@ -137,16 +163,20 @@ class FrameSubtype:
     def decode(cls, data: bytes) -> tuple["FrameSubtype", int]:
         raise NotImplementedError()
 
+
 FRAME_TYPE_TO_CLASS = {}
+
+
 def register_frame_type(frame_type: QuicFrameType):
     def wrapper(cls):
         FRAME_TYPE_TO_CLASS[frame_type] = cls
         return cls
+
     return wrapper
+
 
 @dataclass
 class QuicFrame:
-
     frame_type: QuicFrameType
     # Note:  To ensure simple and efficient implementations of frame parsing, a frame type MUST use the shortest
     #  possible encoding, which means 1 byte for QUIC VERSION_1 frame types.   An endpoint MAY treat the receipt of a
@@ -155,7 +185,7 @@ class QuicFrame:
     content: Optional[FrameSubtype] = None
 
     def __post_init__(self):
-        if self.frame_type in [QuicFrameType.PADDING, QuicFrameType.PING, QuicFrameType.HANDSHAKE_DONE]:
+        if self.frame_type in [QuicFrameType.PADDING, QuicFrameType.PING]:
             if self.content:
                 raise ValueError(f"QUIC {self.frame_type} cannot have content")
 
@@ -181,7 +211,7 @@ class QuicFrame:
         frame_type = QuicFrameType(var_int)  # propagate ValueError
 
         # Frames without content
-        if frame_type in [QuicFrameType.PADDING, QuicFrameType.PING, QuicFrameType.HANDSHAKE_DONE]:
+        if frame_type in [QuicFrameType.PADDING, QuicFrameType.PING]:
             return cls(frame_type), 1
 
         # Content-bearing frames: decode everything after first byte
@@ -198,6 +228,7 @@ class QuicFrame:
 
         raise NotImplementedError(f"QUIC frame type {frame_type} not implemented")
 
+
 def iter_quic_frames(data: bytes):
     offset = 0
     while offset < len(data):
@@ -210,6 +241,7 @@ def iter_quic_frames(data: bytes):
         #     continue
         yield frame, consumed
 
+
 def parse_all_quic_frames(data: bytes) -> tuple[list[QuicFrame], int]:
     frames = []
     total_consumed = 0
@@ -219,6 +251,7 @@ def parse_all_quic_frames(data: bytes) -> tuple[list[QuicFrame], int]:
         total_consumed += consumed
 
     return frames, total_consumed
+
 
 ### QUIC Frame subtypes with content below:
 
@@ -236,6 +269,7 @@ class ACKRange:
         ack_range_length, offset = decode_var_length_int(data[offset:], offset)
         return cls(gap, ack_range_length), offset
 
+
 @dataclass
 class ECNCounts:
     ect0: int
@@ -244,9 +278,9 @@ class ECNCounts:
 
     def encode(self) -> bytes:
         return (
-            encode_var_length_int(self.ect0) +
-            encode_var_length_int(self.ect1) +
-            encode_var_length_int(self.ce)
+                encode_var_length_int(self.ect0) +
+                encode_var_length_int(self.ect1) +
+                encode_var_length_int(self.ce)
         )
 
     @classmethod
@@ -256,7 +290,9 @@ class ECNCounts:
         ce, offset = decode_var_length_int(data[offset:], offset)
         return cls(ect0, ect1, ce), offset
 
+
 ACK_DELAY_EXPONENT = 3  # Used to scale ack_delay to/from encoded value
+
 
 @register_frame_type(QuicFrameType.ACK)
 @register_frame_type(QuicFrameType.ACK_ECN)
@@ -299,11 +335,11 @@ class ACKFrame(FrameSubtype):
         ack_ranges_bytes = b''.join(r.encode() for r in self.ack_ranges)
 
         frame_bytes = (
-            encode_var_length_int(self.largest_ack) +
-            encode_var_length_int(encoded_ack_delay) +
-            encode_var_length_int(self.ack_range_count) +
-            encode_var_length_int(self.first_ack_range) +
-            ack_ranges_bytes
+                encode_var_length_int(self.largest_ack) +
+                encode_var_length_int(encoded_ack_delay) +
+                encode_var_length_int(self.ack_range_count) +
+                encode_var_length_int(self.first_ack_range) +
+                ack_ranges_bytes
         )
 
         if self.ecn_counts:
@@ -337,6 +373,7 @@ class ACKFrame(FrameSubtype):
             ecn_counts=ecn_counts
         ), offset + ecn_offset
 
+
 @register_frame_type(QuicFrameType.RESET_STREAM)
 @dataclass
 class ResetStreamFrame(FrameSubtype):
@@ -346,9 +383,9 @@ class ResetStreamFrame(FrameSubtype):
 
     def encode(self) -> bytes:
         return (
-            encode_var_length_int(self.stream_id) +
-            encode_var_length_int(self.app_error) +
-            encode_var_length_int(self.final_size)
+                encode_var_length_int(self.stream_id) +
+                encode_var_length_int(self.app_error) +
+                encode_var_length_int(self.final_size)
         )
 
     @classmethod
@@ -358,6 +395,7 @@ class ResetStreamFrame(FrameSubtype):
         final_size, offset = decode_var_length_int(data[offset:], offset)
         return cls(stream_id, app_error, final_size), offset
 
+
 @register_frame_type(QuicFrameType.STOP_SENDING)
 @dataclass
 class StopSendingFrame(FrameSubtype):
@@ -366,8 +404,8 @@ class StopSendingFrame(FrameSubtype):
 
     def encode(self) -> bytes:
         return (
-            encode_var_length_int(self.stream_id) +
-            encode_var_length_int(self.app_error)
+                encode_var_length_int(self.stream_id) +
+                encode_var_length_int(self.app_error)
         )
 
     @classmethod
@@ -376,46 +414,6 @@ class StopSendingFrame(FrameSubtype):
         app_error, offset = decode_var_length_int(data[offset:], offset)
         return cls(stream_id, app_error), offset
 
-@register_frame_type(QuicFrameType.CRYPTO)
-@dataclass
-class CryptoFrame(FrameSubtype):
-    data_offset: int
-    crypto_data: bytes = b''
-
-    @property
-    def data_length(self) -> int:
-        return len(self.crypto_data)
-
-    def encode(self) -> bytes:
-        return (
-                encode_var_length_int(self.data_offset) +
-                encode_var_length_int(self.data_length) +
-                self.crypto_data
-        )
-
-    @classmethod
-    def decode(cls, data: bytes) -> tuple["CryptoFrame", int]:
-        data_offset, offset = decode_var_length_int(data)
-        data_length, offset = decode_var_length_int(data[offset:], offset)
-        return cls(data_offset,
-                   crypto_data=data[offset:offset + data_length]), offset + data_length
-
-@register_frame_type(QuicFrameType.NEW_TOKEN)
-@dataclass
-class NewTokenFrame(FrameSubtype):
-    token: bytes
-
-    @property
-    def token_length(self) -> int:
-        return len(self.token)
-
-    def encode(self) -> bytes:
-        return encode_var_length_int(self.token_length) + self.token
-
-    @classmethod
-    def decode(cls, data: bytes) -> tuple["NewTokenFrame", int]:
-        token_length, offset = decode_var_length_int(data)
-        return cls(data[offset:offset + token_length:]), offset + token_length
 
 #@register_frame_type(QuicFrameType.STREAM_BASE)  # Used for mapping base frame type
 @dataclass
@@ -478,6 +476,7 @@ class StreamFrame(FrameSubtype):
             include_length=has_length
         ), offset
 
+
 # more generic way of handling frames that contain a single, variable-length integer field:
 @dataclass
 class SingleVarIntNamedFrame(FrameSubtype):
@@ -498,9 +497,11 @@ class SingleVarIntNamedFrame(FrameSubtype):
         value, offset = decode_var_length_int(data)
         return cls(**{cls._field_name: value}), offset
 
+
 @register_frame_type(QuicFrameType.MAX_DATA)
 class MaxDataFrame(SingleVarIntNamedFrame):
     _field_name = "max_data"
+
 
 @register_frame_type(QuicFrameType.MAX_STREAM_DATA)
 @dataclass
@@ -517,17 +518,21 @@ class MaxStreamData(FrameSubtype):
         max_stream_data, offset = decode_var_length_int(data[offset:], offset)
         return cls(stream_id, max_stream_data), offset
 
+
 @register_frame_type(QuicFrameType.MAX_STREAMS_BIDI)
 class MaxStreamsBidiFrame(SingleVarIntNamedFrame):
     _field_name = "max_streams"
+
 
 @register_frame_type(QuicFrameType.MAX_STREAMS_UNI)
 class MaxStreamsUniFrame(SingleVarIntNamedFrame):
     _field_name = "max_streams"
 
+
 @register_frame_type(QuicFrameType.DATA_BLOCKED)
 class DataBlockedFrame(SingleVarIntNamedFrame):
     _field_name = "data_limit"
+
 
 @register_frame_type(QuicFrameType.STREAM_DATA_BLOCKED)
 @dataclass
@@ -537,8 +542,8 @@ class StreamDataBlockedFrame(FrameSubtype):
 
     def encode(self) -> bytes:
         return (
-            encode_var_length_int(self.stream_id) +
-            encode_var_length_int(self.max_stream_data)
+                encode_var_length_int(self.stream_id) +
+                encode_var_length_int(self.max_stream_data)
         )
 
     @classmethod
@@ -547,13 +552,16 @@ class StreamDataBlockedFrame(FrameSubtype):
         max_stream_data, offset = decode_var_length_int(data[offset:], offset)
         return cls(stream_id, max_stream_data), offset
 
+
 @register_frame_type(QuicFrameType.STREAMS_BLOCKED_BIDI)
 class StreamsBlockedBidiFrame(SingleVarIntNamedFrame):
     _field_name = "limit"
 
+
 @register_frame_type(QuicFrameType.STREAMS_BLOCKED_UNI)
 class StreamsBlockedUniFrame(SingleVarIntNamedFrame):
     _field_name = "limit"
+
 
 @register_frame_type(QuicFrameType.NEW_CONNECTION_ID)
 @dataclass
@@ -592,9 +600,11 @@ class NewConnectionIDFrame(FrameSubtype):
                    data[offset:offset + length],
                    data[offset + length:offset + length + 16]), offset + length + 16
 
+
 @register_frame_type(QuicFrameType.RETIRE_CONNECTION_ID)
 class RetireConnectionIDFrame(SingleVarIntNamedFrame):
     _field_name = "sequence_number"
+
 
 @register_frame_type(QuicFrameType.PATH_CHALLENGE)
 @register_frame_type(QuicFrameType.PATH_RESPONSE)
@@ -612,6 +622,7 @@ class PathChallengeResponseFrame(FrameSubtype):
     @classmethod
     def decode(cls, data: bytes) -> tuple["PathChallengeResponseFrame", int]:
         return cls(data[:8]), 8
+
 
 @register_frame_type(QuicFrameType.TRANSPORT_CLOSE)
 @register_frame_type(QuicFrameType.APPLICATION_CLOSE)
@@ -637,3 +648,94 @@ class ConnectionCloseFrame(FrameSubtype):
             frame_type, offset = decode_var_length_int(data[offset:], offset)
         length, offset = decode_var_length_int(data[offset:], offset)
         return cls(errno, data[offset:offset + length], frame_type), offset + length
+
+
+@dataclass
+class TransportParameter:
+    param_id: TransportParameterType
+    value: int | bool
+
+    def encode(self) -> bytes:
+        pid_bytes = encode_var_length_int(int(self.param_id))
+        if isinstance(self.value, bool):
+            if self.value:  # flag true => length=0, no value bytes
+                return pid_bytes + encode_var_length_int(0)
+            else:
+                return pid_bytes  # false => omit length
+        # integer value
+        val_bytes = encode_var_length_int(int(self.value))
+        return pid_bytes + encode_var_length_int(len(val_bytes)) + val_bytes
+
+    @classmethod
+    def decode(cls, data: bytes) -> tuple[None, int] | tuple["TransportParameter", int]:
+        pid_val, offset_pid = decode_var_length_int(data)
+        # if more data present, try to parse value length next:
+        value_len, offset = decode_var_length_int(data[offset_pid:], offset_pid) if offset_pid < len(data) else (-1,
+                                                                                                                 offset_pid)
+        try:
+            pid = TransportParameterType(pid_val)
+        except ValueError:
+            # unknown parameter id: skip by reading its length and skipping value bytes
+            return None, offset + (value_len if value_len > 0 else 0)
+        if isinstance(QUICLY_DEFAULTS[pid], bool):  # parsing a flag
+            if value_len == 0:
+                value = True
+            else:
+                value = False
+                offset = offset_pid  # omitted length: reset to position after parsing the PARAM_ID for next parameter
+        else:
+            if value_len > 0:  # parsing a varint
+                value, offset = decode_var_length_int(data[offset:], offset)  # value itself is a varint
+            else:  # not a flag but also no value: failure to parse <offset> bytes
+                return None, offset
+        return cls(pid, value), offset
+
+
+def encode_transport_params(params: List[TransportParameter],
+                            include_defaults: bool = False) -> bytes:
+    """Build a TLV list for CONFIG/CONFIG-ACK.
+
+    If include_defaults is True, emit all known parameters using defaults for any
+    missing field. Otherwise, emit only provided keys.
+    """
+    out_items = []
+    if include_defaults:
+        defined_keys = {tp.param_id for tp in params}
+        out_items = [TransportParameter(pid, value) for pid, value in dict(QUICLY_DEFAULTS).items() if
+                     not pid in defined_keys]
+    if params is not None:
+        out_items.extend(params)
+    out = bytearray()
+    for tp in out_items:
+        out += tp.encode()
+    return bytes(out)
+
+
+def decode_transport_params(buf: bytes) -> List[TransportParameter]:
+    """Parse a TLV list into a list of TransportParameters.
+
+    Unknown PARAM_IDs are skipped.  Duplicates use the last value parsed.
+    """
+    out: Dict[TransportParameterType, TransportParameter] = {}
+    while len(buf) > 0:
+        tp, offset = TransportParameter.decode(buf)
+        buf = buf[offset:]
+        if tp is not None:
+            out[tp.param_id] = tp  # potentially overwriting a prior value
+    return [tp for tp in out.values()]
+
+
+@register_frame_type(QuicFrameType.CONFIG)
+@register_frame_type(QuicFrameType.CONFIG_ACK)
+@dataclass
+class ConfigFrame(FrameSubtype):
+    transport_parameters: List[TransportParameter]
+
+    def encode(self, frame_type: int = QuicFrameType.CONFIG) -> bytes:
+        tlv_list_bytes = encode_transport_params(self.transport_parameters)
+        return encode_var_length_int(len(tlv_list_bytes)) + tlv_list_bytes
+
+    @classmethod
+    def decode(cls, data: bytes) -> tuple["ConfigFrame", int]:
+        data_length, offset = decode_var_length_int(data)
+        return cls(decode_transport_params(data[offset:offset + data_length])), offset + data_length

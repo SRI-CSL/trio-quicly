@@ -48,10 +48,12 @@ Terminology otherwise follows QUIC Transport {{RFC9000}}.
 
 QUIC-LY establishes a connection in one round trip, without TLS:
 
-* Client sends an Initial packet using QUIC-LY’s version with a CONFIG frame (optional) and padding to reach a configured size (Section {{packet-types-and-headers}}).
-* Server responds with ACK (for the Initial) and CONFIG-ACK (if needed). Both endpoints then consider the connection established and proceed with Short Header packets.
+* Client sends an Initial packet using QUIC-LY’s version with a CONFIG frame (optionally empty if defaults are used), any Stream data desired, and padding to reach a configured size (Section {{packet-types-and-headers}}).
+* Server responds with ACK (for the Initial) and CONFIG-ACK (if needed to override defaults or client values). Both endpoints then consider the connection established and proceed with Short Header packets.
 
-The CONFIG/CONFIG-ACK exchange carries a compact set of transport parameters using TLVs. Operators MAY omit CONFIG entirely and rely on prearranged defaults.
+The CONFIG/CONFIG-ACK exchange carries a compact set of transport parameters using TLVs. Operators MAY omit CONFIG entries entirely and rely on prearranged defaults.
+
+Note that the Initial packet from client to server must carry a payload of at least 1 Byte to conform with QUIC. Therefore, an empty CONFIG frame is minimally required.
 
 # Version and Scope
 
@@ -81,31 +83,39 @@ Allowed: STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAMS, MAX_STREAM_D
 
 Disallowed: CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, early-data related frames.
 
-## CONFIG Frame
+## CONFIG and CONFIG_ACK Frames
 
-*Frame Type:* `0x3a` (suggested; see IANA Considerations).
+*Frame Type:* `0x3a` and `0x3b` (suggested; see IANA Considerations).
 
-The CONFIG frame conveys proposed transport parameters from client to server. Its format is:
+The Config frame conveys proposed transport parameters from client to server and confirmation or overriding settings in return. 
 
-~~~
-CONFIG = FRAME_TYPE (varint = 0x3a),
-         LENGTH (varint),
-         TLV-List (LENGTH bytes)
-~~~
-
-Each TLV is encoded as:
+Its format is shown in Figure XX.
 
 ~~~
-TLV = PARAM_ID (varint), VALUE_LEN (varint), VALUE (VALUE_LEN bytes)
+CONFIG Frame {
+  Type (i) = 0x3a..0x3b,
+  [Length (i)],
+  TLV-List (..),  # Length bytes
+}
+~~~
+
+If Length is omitted or 0 then the TLV-List has no entries.  Otherwise, the TLV-List is exactly Length bytes long.
+
+Each Transport Paremeter as TLV is encoded as:
+
+~~~
+TLV {
+  Param ID (i), 
+  [Value Length (i)],
+  Value (..)
+}
 ~~~
 
 Integers inside VALUE are QUIC varints unless otherwise stated. A parameter that is a boolean flag is encoded with `VALUE_LEN = 0` to mean true; absence means false.
 
-## CONFIG-ACK Frame
+The server replies with CONFIG-ACK to indicate the effective values that apply to the connection (accepted or clamped). Format is identical to CONFIG. Again, if the Length field is missing or 0, then all client suggested values are accepted. 
 
-*Frame Type:* `0x3b` (suggested; see IANA Considerations).
-
-The server replies with CONFIG-ACK to indicate the effective values that apply to the connection (accepted or clamped). Format is identical to CONFIG.
+After receiving this response, the connection is established and the values in the server's CONFIG-ACK response take presedence.
 
 ## Transport Parameters (TLVs) {#transport-parameters-tlvs}
 
@@ -134,10 +144,14 @@ initial_padding_target = 1200; disable_active_migration = absent (false).
 
 ### TLV Encoding Details and Example
 
-A TLV is a compact **Type–Length–Value** item carried inside CONFIG / CONFIG-ACK. It is encoded as:
+A TLV is a compact **Type–Length–Value** item carried inside CONFIG / CONFIG-ACK frames. It is encoded as:
 
 ~~~
-TLV = PARAM_ID (varint) , VALUE_LEN (varint) , VALUE (VALUE_LEN bytes)
+TLV {
+  Param ID (i), 
+  [Value Length (i)],
+  Value (..)
+}
 ~~~
 
 Encoding rules:
@@ -219,7 +233,9 @@ PARAM_ID = 0x08 , VALUE_LEN = 0 → bytes: 08 00
 **Client → Server (Initial):**
 
 * Long Header, Version = `0x51554c59`.
-* Frames: CONFIG (optional), application STREAM data (optional), padding to reach the configured target.
+* Frames: CONFIG (possibly empty TLV list), application STREAM data (optional), padding to reach the configured target.
+
+The INITIAL packet from the client to the server contains at a minimum a CONFIG frame, which could be empty (Length = 0 or omitted). This is because the original QUIC specification requires a payload of at least 1 byte.
 
 **Server → Client (First Response):**
 
@@ -293,6 +309,8 @@ encode_config(map):
     emit varint(id)
     if val is flag_true:
       emit varint(0)
+    elif val is flag_false:
+      pass  # omit value length and value
     else:
       tmp = encode_as_varint_bytes(val)
       emit varint(len(tmp))
@@ -307,9 +325,15 @@ parse_config(bytes):
   out = {}
   while pos < end:
     pid = read_varint()
-    vlen = read_varint()
-    val = read(vlen)
-    out[pid] = (flag_true if vlen == 0 else val)
+    vlen = read_varint() if pos < end else vlen = -1
+    if pid is flag:
+      if vlen == 0:
+        out[pid] = flag_true
+     else:
+        out[pid] = flag_false
+    else:  # if pid known:
+      val = read(vlen)
+      out[pid] = val
   return out
 ~~~
 
@@ -317,20 +341,22 @@ parse_config(bytes):
 
 **Client states:** `START → WAIT_FIRST → ESTABLISHED → CLOSING → DRAINING`
 
-START: Send Initial (ver=`0x51554c59`) with optional CONFIG and padding to the configured target; enter `WAIT_FIRST`.
+START: Send Initial (ver=`0x51554c59`) with CONFIG frame (potentially empty), optional application data (STREAM or DATAGRAM frames), and padding to the configured target; enter `WAIT_FIRST`.
 
-WAIT_FIRST: On receiving server ACK of the Initial (and optional CONFIG-ACK), apply parameters and enter `ESTABLISHED`. Ignore any Version Negotiation. On CONNECTION_CLOSE, enter `DRAINING`.
+WAIT_FIRST: On receiving server ACK of the Initial (CONFIG-ACK, possibly empty), apply parameters and enter `ESTABLISHED`. Ignore any Version Negotiation. On receiving CONNECTION_CLOSE, enter `DRAINING`.
 
-ESTABLISHED: Use Short Header packets with STREAM/ACK/flow control.
+ESTABLISHED: Use Short Header packets with STREAM/ACK/flow control. When application wants to close, send CONNECTION_CLOSE frame and enter `CLOSING`.
+
+CLOSING: On receiving CONNECTIONC_CLOSE, enter `DRAINING`.
 
 **Server states:** `LISTEN → ESTABLISHED → CLOSING → DRAINING`
 
-LISTEN: On client Initial (ver=`0x51554c59`), parse CONFIG (if any), respond with ACK and CONFIG-ACK (if needed); enter `ESTABLISHED`.
+LISTEN: On client Initial (ver=`0x51554c59`), parse CONFIG (if any), respond with ACK and CONFIG-ACK (possibly empty); enter `ESTABLISHED`.
 
-ESTABLISHED: Normal operation.
+ESTABLISHED: Normal operation until server initiates closing by sending CONNECTION_CLOSE, enter `CLOSING`, or until receiving CONNECTION_CLOSE, then enter `DRAINING`.
 
 # Appendix C. Interoperability Notes
 
-* If CONFIG/CONFIG-ACK are omitted, endpoints use local defaults.
+* If CONFIG/CONFIG-ACK are empty, endpoints use local defaults.
 * When `initial_padding_target` < 1200, re-evaluate anti-amplification policy.
 * Unknown CONFIG parameters MUST be ignored to allow evolution.

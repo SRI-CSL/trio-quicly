@@ -8,23 +8,16 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import *
 
-from .crypto import decode_var_length_int
 from .exceptions import QuicProtocolViolation
-from .frame import encode_var_length_int, QuicFrame, parse_all_quic_frames
+from .frame import encode_var_length_int, decode_var_length_int, QuicFrame, parse_all_quic_frames
 
 MAX_UDP_PACKET_SIZE = 65527
 
-# QUIC Packet
-# : QUIC Endpoints communicate by exchanging Packets. Packets have confidentiality and integrity protection. QUIC Packets
-# are complete processable units of QUIC that can be encapsulated in a UDP datagram. One or more QUIC Packets can be
-# encapsulated in a single UDP datagram, which is in turn encapsulated in an IP packet.
+# QUIC Packet : QUIC Endpoints communicate by exchanging Packets. QUIC Packets are complete processable units of QUIC
+# that can be encapsulated in a UDP datagram. One or more QUIC Packets can be encapsulated in a single UDP datagram,
+# which is in turn encapsulated in an IP packet.
 
-CLIENT_VERSION = bytes.fromhex("03 03")  # always indicates TLS 1.2 to allow passing through middle boxes
 PACKET_LONG_HEADER = 0x80
-# PACKET_FIXED_BIT = 0x40
-# PACKET_SPIN_BIT = 0x20
-# def get_spin_bit(first_byte: int) -> bool:
-#     return bool(first_byte & PACKET_SPIN_BIT)
 
 def is_long_header(first_byte: int) -> bool:
     return bool(first_byte & PACKET_LONG_HEADER)
@@ -42,19 +35,11 @@ class QuicProtocolVersion(IntEnum):
 
 class QuicPacketType(IntEnum):
     INITIAL = 0
-    ZERO_RTT = 1
-    HANDSHAKE = 2
-    RETRY = 3
-    VERSION_NEGOTIATION = 4
     ONE_RTT = 5
 
     def __str__(self):
         return {
             QuicPacketType.INITIAL: "Initial Packet",
-            QuicPacketType.ZERO_RTT: "0-RTT Packet",
-            QuicPacketType.HANDSHAKE: "Handshake Packet",
-            QuicPacketType.RETRY: "Retry Packet",
-            QuicPacketType.VERSION_NEGOTIATION: "Version Negotiation Packet",
             QuicPacketType.ONE_RTT: "1-RTT Packet",
         }[self]
 
@@ -63,22 +48,22 @@ class QuicPacket:
 
     is_long_header: bool = field(init=False)  # defines first bit in first byte
 
-    packet_type: QuicPacketType = field(init=False)  #  not encoded for `VERSION_NEGOTIATION` and `ONE_RTT` packets
+    packet_type: QuicPacketType = field(init=False)  #  not encoded for `ONE_RTT` packets
 
     destination_cid: bytes  # destination connection ID (0--20 Bytes)
 
     packet_number_length: int = field(default=1, init=False)  # 2 bits + 1 = 1..4 values.
     # To be derived post_init from packet_number!
-    # Only present in `INITIAL`, `ZERO_RTT`, `HANDSHAKE`, and `ONE_RTT` packets.
+    # Only present in `INITIAL` and `ONE_RTT` packets.
 
     packet_number: Optional[int] = field(default=None, init=False)  # The packet number (1..4 Bytes).
-    # Only present in `INITIAL`, `ZERO_RTT`, `HANDSHAKE`, and `ONE_RTT` packets.
+    # Only present in `INITIAL` and `ONE_RTT` packets.
 
     payload: Optional[bytes] = field(default=None, init=False)  # The packet payload (1.. Bytes).
-    # Only present in `INITIAL`, `ZERO_RTT`, `HANDSHAKE`, and `ONE_RTT` packets.
+    # Only present in `INITIAL` and `ONE_RTT` packets.
 
     reserved_bits: int = field(default=0, init=False)  # 2 bits = values 0..3.
-    # Only present in `INITIAL`, `ZERO_RTT`, `HANDSHAKE`, and `ONE_RTT` packets.
+    # Only present in `INITIAL` and `ONE_RTT` packets.
     # Must be 0 prior to protection, otherwise, endpoint receiving and having removed both packet and header
     # protection should treat this as connection error of type PROTOCOL_VIOLATION.
 
@@ -104,45 +89,28 @@ class QuicPacket:
 @dataclass
 class LongHeaderPacket(QuicPacket):
 
+    # fixed values (since QUIC-LY only has INITIAL long header packets):
     is_long_header: bool = field(default=True, init=False)
-    packet_type: QuicPacketType = field(init=True)
-
+    packet_type: QuicPacketType = field(default=QuicPacketType.INITIAL, init=False)  # QUIC-LY only has INITIAL type
     version: int = field(default=QuicProtocolVersion.QUICLY, init=False)
 
     source_cid: bytes = None  # source connection ID (0..20 Bytes)
-
-    token: bytes = None  # The address verification token. Only present in `INITIAL` and `RETRY` packets.
-
-    integrity_tag: bytes = None  # The retry integrity tag. Only present in `RETRY` packets.
-
-    packet_number: Optional[int] = None  # Not used for `RETRY` packets
-    payload: Optional[List[QuicFrame]] = None  # Must contain at least 1 byte for all but `RETRY` packets
+    packet_number: int = None
+    payload: List[QuicFrame] = None  # Must contain at least 1 byte
 
     def __post_init__(self):
         super().__post_init__()
         assert self.source_cid is not None
-        if self.packet_type not in {QuicPacketType.RETRY, QuicPacketType.VERSION_NEGOTIATION}:
-            assert self.packet_number is not None
-            assert self.payload is not None and len(self.payload) > 0
-        elif self.packet_type is QuicPacketType.RETRY:
-            assert self.integrity_tag is not None
-            assert len(self.integrity_tag) == 16
-            assert self.token is not None
 
     def encode_first_byte(self) -> int:
-        assert self.packet_type not in {QuicPacketType.VERSION_NEGOTIATION, QuicPacketType.ONE_RTT}
+        assert self.packet_type == QuicPacketType.INITIAL
         assert self.packet_type.bit_length() <= 2
         first_four_bits =  (
             (self.is_long_header << 3)  # first bit should be 1
             | (1 << 2)                  # second bit is FIXED BIT
             | self.packet_type
         )
-        if self.packet_type != QuicPacketType.RETRY:
-            assert self.reserved_bits.bit_length() <= 2
-            assert (self.packet_number_length - 1).bit_length() <= 2
-            return first_four_bits << 4 | (self.reserved_bits << 2) | (self.packet_number_length - 1)
-        else:
-            return first_four_bits << 4 | 0b0000  # bits 5..8 are unused for `RETRY` packets
+        return first_four_bits << 4 | (self.reserved_bits << 2) | (self.packet_number_length - 1)
 
     def encode_all_bytes(self) -> bytes:
         long_packed_header = struct.pack(
@@ -154,44 +122,27 @@ class LongHeaderPacket(QuicPacket):
             len(self.source_cid),
             self.source_cid,
         )
-        if self.packet_type == QuicPacketType.RETRY:
-            return long_packed_header \
-                + self.token \
-                + self.integrity_tag
-        else:
-            payload_bytes = b''.join(p.encode() for p in self.payload)
-            if self.packet_type == QuicPacketType.INITIAL:
-                token_length = len(self.token) if self.token is not None else 0
-                token_length_encoded = encode_var_length_int(token_length)
-                prefix = long_packed_header \
-                    + struct.pack(
-                        f"!{len(token_length_encoded)}s",
-                        token_length_encoded)
-                if token_length > 0:
-                    prefix += self.token
-                length_encoded = encode_var_length_int(self.packet_number_length + len(payload_bytes))
-                return prefix \
-                    + struct.pack(
-                        f"{len(length_encoded)}s{self.packet_number_length}s",
-                        length_encoded,
-                        self.packet_number.to_bytes(self.packet_number_length)) \
-                    + payload_bytes
-            elif self.packet_type in {QuicPacketType.ZERO_RTT, QuicPacketType.HANDSHAKE}:
-                length_encoded = encode_var_length_int(self.packet_number_length + len(payload_bytes))
-                return long_packed_header \
-                    + struct.pack(
-                        f"!{len(length_encoded)}s{self.packet_number_length}s",
-                        length_encoded,
-                        self.packet_number.to_bytes(self.packet_number_length)) \
-                    + payload_bytes
-        raise RuntimeError(f"Cannot encode packet type: {self.packet_type}")
+        payload_bytes = b''.join(p.encode() for p in self.payload)
+        token_length = 0
+        token_length_encoded = encode_var_length_int(token_length)
+        prefix = long_packed_header \
+                 + struct.pack(
+            f"!{len(token_length_encoded)}s",
+            token_length_encoded)
+        length_encoded = encode_var_length_int(self.packet_number_length + len(payload_bytes))
+        return prefix \
+            + struct.pack(
+                f"{len(length_encoded)}s{self.packet_number_length}s",
+                length_encoded,
+                self.packet_number.to_bytes(self.packet_number_length)) \
+            + payload_bytes
 
     @classmethod
     def decode_all_bytes(cls, data: bytes) -> tuple["LongHeaderPacket", int]:
         pkt_type_n = (data[0] & 0b00110000) >> 4  # Bits 3–4
 
-        if pkt_type_n > 3:
-            raise ValueError(f"Packet type number {pkt_type_n} is not valid")
+        if pkt_type_n != 0:
+            raise ValueError(f"Packet type number {pkt_type_n} is not supported in QUIC-LY protocol")
         packet_type = QuicPacketType(pkt_type_n)
 
         assert int.from_bytes(data[1:5]) == QuicProtocolVersion.QUICLY
@@ -200,81 +151,23 @@ class LongHeaderPacket(QuicPacket):
         src_cid, offset1 = get_connection_id(data[offset:])
         offset += offset1
 
-        if packet_type == QuicPacketType.RETRY:
-            # RETRY packets are always at the end of UDP payload:
-            return LongHeaderPacket(packet_type=packet_type,
-                                    destination_cid=dst_cid, source_cid=src_cid,
-                                    token=data[offset:-16], integrity_tag=data[-16:]), len(data)
-
-        assert packet_type in {QuicPacketType.INITIAL, QuicPacketType.ZERO_RTT, QuicPacketType.HANDSHAKE}
+        assert packet_type == QuicPacketType.INITIAL
         # parse lower 4-bits of first byte:
         reserved_bits = (data[0] & 0b00001100) >> 2  # Bits 5-6
         if not reserved_bits == 0:
             raise QuicProtocolViolation(f"{packet_type} must have 0b00 for reserved bits in long header")
         packet_number_length = (data[0] & 0b00000011) + 1  # Bits 7-8 but add 1 to map to values 1..4
 
-        token = None
-        if packet_type == QuicPacketType.INITIAL:
-            token_length, offset1 = decode_var_length_int(data[offset:])
-            offset += offset1
-            if token_length > 0:
-                token = data[offset:offset+token_length]
-                offset += token_length
-        # all 3 remaining packet types now have length (i), packet number, and packet payload left from offset on:
+        token_length, offset1 = decode_var_length_int(data[offset:])
+        assert token_length == 0  # QUIC-LY is not using tokens
+        offset += offset1
         length, offset1 = decode_var_length_int(data[offset:])
         offset += offset1
         frames, consumed = parse_all_quic_frames(data[offset+packet_number_length:offset+length]) # length includes packet number length and payload
         assert consumed == length - packet_number_length
-        return LongHeaderPacket(packet_type=packet_type,
-                                destination_cid=dst_cid, source_cid=src_cid,
-                                token=token,
+        return LongHeaderPacket(destination_cid=dst_cid, source_cid=src_cid,
                                 packet_number=int.from_bytes(data[offset:offset+packet_number_length]),
                                 payload=frames), offset + length
-
-@dataclass
-class VersionNegotiationPacket(LongHeaderPacket):
-
-    packet_type: QuicPacketType = field(default=QuicPacketType.VERSION_NEGOTIATION, init=False)
-    version: int = field(default=QuicProtocolVersion.NEGOTIATION, init=False)
-    packet_number: Optional[int] = field(default=None, init=False)  # not used for `VERSION_NEGOTIATION` packets
-    supported_versions: List[int] = field(default_factory=list)  # Supported protocol versions.
-                                                                 # Only present in `VERSION_NEGOTIATION` packets.
-
-    def encode_first_byte(self) -> int:
-        assert self.packet_type == QuicPacketType.VERSION_NEGOTIATION
-        return PACKET_LONG_HEADER  # bits 2..8 are unused
-
-    def encode_all_bytes(self) -> bytes:
-        return struct.pack(
-            f"!BLB{len(self.destination_cid)}sB{len(self.source_cid)}s{len(self.supported_versions)}L",
-            self.encode_first_byte(),
-            self.version,
-            len(self.destination_cid),
-            self.destination_cid,
-            len(self.source_cid),
-            self.source_cid,
-            *self.supported_versions
-        )
-
-    @classmethod
-    def decode_all_bytes(cls, data: bytes) -> tuple["VersionNegotiationPacket", int]:
-        if len(data) < 11:
-            raise ValueError("Version Negotiation packet too short, must have at least 11 bytes")
-        first_byte_has_msb_set = (data[0] & 0b10000000) != 0
-        last_4_bytes_are_zero = data[1:5] == b'\x00\x00\x00\x00'
-        if not (first_byte_has_msb_set and last_4_bytes_are_zero):
-            raise ValueError("Version Negotiation does not match expected format for first 5 bytes")
-
-        dst_cid, offset = get_connection_id(data[5:])
-        offset += 5
-        src_cid, offset1 = get_connection_id(data[offset:])
-        offset += offset1
-        supported_versions = [int.from_bytes(data[i:i + 4], 'big') for i in range(offset, len(data) - 3, 4)]
-        return VersionNegotiationPacket(
-            dst_cid,
-            source_cid=src_cid,
-            supported_versions=supported_versions
-        ), offset + len(supported_versions)*4
 
 @dataclass
 class ShortHeaderPacket(QuicPacket):
@@ -352,21 +245,17 @@ def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kw
         if not required_keys.issubset(kwargs):
             raise ValueError(f"Missing required keyword arguments for {packet_type}: {required_keys - kwargs.keys()}")
         return ShortHeaderPacket(destination_cid=destination_cid, **kwargs)
+    assert packet_type == QuicPacketType.INITIAL
     if "source_cid" not in kwargs:
         raise ValueError(f"Missing required keyword argument 'source_cid' for {packet_type}")
-    elif packet_type == QuicPacketType.VERSION_NEGOTIATION:
-        return VersionNegotiationPacket(destination_cid=destination_cid, **kwargs)
-    return LongHeaderPacket(packet_type=packet_type, destination_cid=destination_cid, **kwargs)
+    return LongHeaderPacket(destination_cid=destination_cid, **kwargs)
 
 def decode_quic_packet(byte_stream: bytes, destination_cid: bytes = None) -> tuple[Optional[QuicPacket], int]:
     if not len(byte_stream):
         return None, 0
     try:
         if (byte_stream[0] & 0b10000000) != 0:  # Long header
-            if int.from_bytes(byte_stream[1:5]) == 0:
-                return VersionNegotiationPacket.decode_all_bytes(byte_stream)
-            else:
-                return LongHeaderPacket.decode_all_bytes(byte_stream)
+            return LongHeaderPacket.decode_all_bytes(byte_stream)
         else:  # Short header
             return ShortHeaderPacket.decode_all_bytes(byte_stream, destination_cid=destination_cid)
     except ValueError:
@@ -394,3 +283,66 @@ def decode_udp_packet(payload: bytes, destination_cid: bytes = None):
 
         yield packet
         offset += consumed
+
+
+def encode_packet_number(full_pn: int, largest_acked: int = None) -> bytes:
+    """
+    Select an appropriate size for packet number encodings.
+
+    full_pn is the full packet number of the packet being sent.
+    largest_acked is the largest packet number that has been acknowledged by the peer in the current packet number
+      space, if any.
+
+    See: Appendix A - Sample Packet Number Encoding Algorithm
+    """
+
+    # The number of bits must be at least one more than the base-2 logarithm of the number of contiguous unacknowledged
+    # packet numbers, including the new packet.
+    if largest_acked is None:
+        num_unacked = full_pn + 1
+    else:
+        num_unacked = full_pn - largest_acked
+
+    min_bits = math.log(num_unacked, 2) + 1
+    num_bytes = math.ceil(min_bits / 8)
+
+    # Encode the integer value and truncate to the num_bytes least significant bytes.
+    total_bytes = (full_pn.bit_length() + 7) // 8 or 1  # Min 1 byte
+    encoded_bytes = full_pn.to_bytes(total_bytes, byteorder="big", signed=False)
+    # Truncate to the least significant num_bytes
+    return encoded_bytes[-num_bytes:]
+
+
+def decode_packet_number(truncated_pn: int, pn_nbits: int, largest_pn: int) -> int:
+    """
+    Recover a packet number from a truncated packet number.
+
+    truncated_pn is the value of the Packet Number field.
+    pn_nbits is the number of bits in the Packet Number field (8, 16, 24, or 32).
+    largest_pn is the largest packet number that has been successfully processed in the current packet number space.
+
+    See: Appendix A - Sample Packet Number Decoding Algorithm
+    """
+    expected_pn = largest_pn + 1
+    pn_win = 1 << pn_nbits
+    pn_hwin = pn_win / 2
+    pn_mask = pn_win - 1
+
+    # The incoming packet number should be greater than
+    # expected_pn - pn_hwin and less than or equal to
+    # expected_pn + pn_hwin
+    #
+    # This means we cannot just strip the trailing bits from
+    # expected_pn and add the truncated_pn because that might
+    # yield a value outside the window.
+    #
+    # The following code calculates a candidate value and
+    # makes sure it's within the packet number window.
+    # Note the extra checks to prevent overflow and underflow.
+    candidate_pn = (expected_pn & ~pn_mask) | truncated_pn
+    if candidate_pn <= expected_pn - pn_hwin and candidate_pn < (1 << 62) - pn_win:
+        return candidate_pn + pn_win
+    elif candidate_pn > expected_pn + pn_hwin and candidate_pn >= pn_win:
+        return candidate_pn - pn_win
+    else:
+        return candidate_pn

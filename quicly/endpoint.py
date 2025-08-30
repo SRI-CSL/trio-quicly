@@ -12,7 +12,7 @@ import warnings
 import weakref
 
 from .configuration import QuicConfiguration
-from .connection import SimpleQuicConnection
+from .connection import SimpleQuicConnection, ConnectionState
 from .exceptions import QuicProtocolError
 from .packet import MAX_UDP_PACKET_SIZE
 from .utils import _Queue, AddressFormat, PosArgsT
@@ -309,6 +309,7 @@ class QuicServer(QuicEndpoint):
             async def establish_and_handle(new_connection: SimpleQuicConnection, initial_payload: bytes) -> None:
                 if await new_connection.do_handshake(initial_payload) and not new_connection.is_closed:
                     # handshake was successful
+                    assert new_connection.state == ConnectionState.ESTABLISHED
                     with new_connection:
                         await handler(new_connection, *args)
                 # TODO: if we end up here, we should remove the connection from the endpoint's list!
@@ -419,12 +420,16 @@ class QuicClient(QuicEndpoint):
                                           None,
                                           self.incoming_packets_buffer,
                                           configuration=client_configuration)
-        encoded_initial_pkt = connection.init_handshake()  # creates crypto material etc.
+        encoded_initial_pkt = connection.init_handshake()
         await self.send_q.s.send((encoded_initial_pkt, target_address))
-        (payload, remote_address) = await self.new_connections_q.r.receive()  # TODO: what about timeouts?
-        connection.remote_address = remote_address
-        self.connections[connection.remote_address] = connection
-        await connection.do_handshake(payload) # TODO: check that return is True, payload is INITIAL, 0 from server etc.
+        connection.state = ConnectionState.WAIT_FIRST
+        while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
+            # TODO: wrap with a cancellation scope to enforce a timeout? what happens to the lock underneath??
+            #  Timers: use  loss-recovery PTO if available; else a fixed small value (e.g., 200–333 ms) would work
+            (payload, remote_address) = await self.new_connections_q.r.receive()
+            connection.remote_address = remote_address
+            self.connections[connection.remote_address] = connection
+            await connection.do_handshake(payload)
         if connection.is_closed:
             raise QuicProtocolError("Could not establish QUIC connection")
         return connection

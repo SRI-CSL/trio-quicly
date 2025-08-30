@@ -3,13 +3,11 @@
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
 import math
-import secrets
 
-from quicly.crypto import decode_var_length_int, encode_packet_number, decode_packet_number
 from quicly.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
-    VersionNegotiationPacket, ShortHeaderPacket, decode_quic_packet, \
-    LongHeaderPacket, decode_udp_packet
-from quicly.frame import encode_var_length_int, QuicFrame, QuicFrameType, MaxDataFrame, parse_all_quic_frames
+    ShortHeaderPacket, decode_quic_packet, \
+    LongHeaderPacket, decode_udp_packet, encode_packet_number, decode_packet_number
+from quicly.frame import decode_var_length_int, QuicFrame, QuicFrameType, MaxDataFrame, parse_all_quic_frames
 
 sample_dcid = bytes.fromhex("c2 19 7c 5e ff 14 e8")  # 7 Bytes long
 sample_scid = bytes.fromhex("ff 14 e8 8c")  # 4 Bytes long
@@ -45,33 +43,6 @@ def check_long_header(packet: bytes, expected_length: int, expected_dcid: bytes,
     assert expected_dcid == packet[6:13]
     assert expected_scid == packet[14:18]
 
-def test_ver_neg_pkt():
-    silly_version = int.from_bytes(bytes.fromhex("aa bb cc dd"))
-    ver_neg_pkt = create_quic_packet(QuicPacketType.VERSION_NEGOTIATION, sample_dcid,
-                                     source_cid=sample_scid,
-                                     supported_versions=[QuicProtocolVersion.QUICLY,
-                                                         silly_version])
-    first_byte = ver_neg_pkt.encode_first_byte()
-    assert "10000000" == f"{first_byte:08b}"  # first bit == 1
-    packet = ver_neg_pkt.encode_all_bytes()
-    # print(f"\n{packet.hex(' ')}")
-    assert len(packet) == 26
-    assert QuicProtocolVersion.NEGOTIATION == int.from_bytes(packet[1:5])
-    assert sample_dcid == packet[6:13]
-    assert sample_scid == packet[14:18]
-    assert QuicProtocolVersion.QUICLY == int.from_bytes(packet[18:22])
-
-    decoded_pkt, consumed = VersionNegotiationPacket.decode_all_bytes(packet)
-    assert len(decoded_pkt.supported_versions) == 2
-    assert QuicProtocolVersion.QUICLY == decoded_pkt.supported_versions[0]
-    assert silly_version == decoded_pkt.supported_versions[1]
-
-    # adding 2 extra bytes at end that should be safely ignored:
-    decoded_pkt, consumed = decode_quic_packet(
-        bytes.fromhex("80 00 00 00 00 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 00 00 00 01 aa bb cc dd ff ee"))
-    assert isinstance(decoded_pkt, VersionNegotiationPacket)
-    assert len(decoded_pkt.supported_versions) == 2
-
 def test_short_header():
     frames = [QuicFrame(frame_type=QuicFrameType.MAX_DATA, content=MaxDataFrame(max_data=42)),
               QuicFrame(frame_type=QuicFrameType.PADDING)]
@@ -95,7 +66,7 @@ def test_short_header():
 
     decoded_pkt, consumed = decode_quic_packet(bytes.fromhex("46 c2 19 7c 5e ff 14 e8 ac 5c 02 ") +
                                                b''.join([frame.encode() for frame in frames]) +
-                                               b'\x1egarbage',  # HANDSHAKE DONE frame
+                                               b'\x01garbage',  # TODO: debug this! APPLICATION_CLOSE frame
                                                destination_cid=sample_dcid)
     assert isinstance(decoded_pkt, ShortHeaderPacket)
     assert consumed == 15
@@ -116,111 +87,45 @@ def test_initial_packets():
     assert (length, start) == (len(encoded_pn) + 4, 1)  # payload is 4 bytes long
     assert packet_number == int.from_bytes(packet[19+start:19+start+len(encoded_pn)])
 
-    tkn = bytes.fromhex("c5 00 7f ff 25")
-    initial_pkt_w_tkn = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
-                                           token=tkn, packet_number=packet_number,
-                                           payload=[QuicFrame(frame_type=QuicFrameType.MAX_DATA, content=MaxDataFrame(max_data=42))])
-    first_byte = initial_pkt_w_tkn.encode_first_byte()
-    assert "11000010" == f"{first_byte:08b}"  # bits 3..4 = INITIAL,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
-    packet = initial_pkt_w_tkn.encode_all_bytes()
-    # print(f"\n{packet.hex(' ')}")
-    check_long_header(packet, 30, sample_dcid, sample_scid)
-    encoded_tkn_len = encode_var_length_int(len(tkn))
-    (tkn_len, offset) = decode_var_length_int(packet[18:])
-    assert (tkn_len, offset) == (int.from_bytes(encoded_tkn_len), 1)  # value of 5 fits into 1 byte
-    assert tkn == packet[18+offset:18+offset+tkn_len]
-    (length, start) = decode_var_length_int(packet[18+offset+tkn_len:])
-    assert (length, start) == (len(encoded_pn) + 2, 1)  # payload is 2 bytes long
-    assert packet_number == int.from_bytes(packet[24+start:24+start+len(encoded_pn)])
-
     # adding some padding of NUL bytes at the end
     decoded_pkt, consumed = decode_quic_packet(
-        bytes.fromhex("c2 51 55 4c 59 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 05 c5 00 7f ff 25 07 ac 5c 02 01 00 00 00 00 00"))
+        bytes.fromhex("c2 51 55 4c 59 07 c2 19 7c 5e ff 14 e8 04 ff 14 e8 8c 00 07 ac 5c 02 01 00 00 00 00 00")
+    )
     assert isinstance(decoded_pkt, LongHeaderPacket)
     assert decoded_pkt.is_long_header
     assert decoded_pkt.packet_type == QuicPacketType.INITIAL
     assert decoded_pkt.destination_cid == sample_dcid
     assert decoded_pkt.source_cid == sample_scid
-    assert decoded_pkt.token == tkn
     assert decoded_pkt.packet_number == packet_number
     assert decoded_pkt.packet_number_length == len(encoded_pn)
     assert len(decoded_pkt.payload) == 4
 
-def test_quic_packets():
-    frames, _ = parse_all_quic_frames(bytes.fromhex("00 1e"))
-
-    zero_rtt_pkt = create_quic_packet(QuicPacketType.ZERO_RTT, sample_dcid, source_cid=sample_scid,
-                                      packet_number=packet_number, payload=frames)
-    first_byte = zero_rtt_pkt.encode_first_byte()
-    assert "11010010" == f"{first_byte:08b}"  # bits 3..4 = 0-RTT,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
-    packet = zero_rtt_pkt.encode_all_bytes()
-    # print(f"\n{packet.hex(' ')}")
-    check_long_header(packet, 24, sample_dcid, sample_scid)
-    (length, start) = decode_var_length_int(packet[18:])
+    initial_pkt_w_max_data = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
+                                                packet_number=packet_number,
+                                                payload=[QuicFrame(frame_type=QuicFrameType.MAX_DATA,
+                                                                   content=MaxDataFrame(max_data=42))])
+    first_byte = initial_pkt_w_max_data.encode_first_byte()
+    assert "11000010" == f"{first_byte:08b}"  # bits 3..4 = INITIAL,  bits 5..6 = 0 (reserved), bits 7..8 encode 2 == len(encoded_pn) - 1
+    packet = initial_pkt_w_max_data.encode_all_bytes()
+    check_long_header(packet, 25, sample_dcid, sample_scid)
+    (tkn_len, offset) = decode_var_length_int(packet[18:])
+    assert (tkn_len, offset) == (0, 1)
+    (length, start) = decode_var_length_int(packet[18 + offset + tkn_len:])
     assert (length, start) == (len(encoded_pn) + 2, 1)  # payload is 2 bytes long
-    assert packet_number == int.from_bytes(packet[18+start:18+start+len(encoded_pn)])
-
-    handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE, sample_dcid, source_cid=sample_scid,
-                                       packet_number=packet_number, payload=frames)
-    first_byte = handshake_pkt.encode_first_byte()
-    assert "11100010" == f"{first_byte:08b}"  # bits 3-4 = HANDSHAKE,  bits 5-6 = 0 (reserved), bits 7-8 encode 2 == len(encoded_pn) - 1
-    packet = handshake_pkt.encode_all_bytes()
-    # print(f"\n{packet.hex(' ')}")
-    check_long_header(packet, 24, sample_dcid, sample_scid)
-    (length, start) = decode_var_length_int(packet[18:])
-    assert (length, start) == (len(encoded_pn) + 2, 1)  # payload is 2 bytes long
-    assert packet_number == int.from_bytes(packet[18+start:18+start+len(encoded_pn)])
-
-    decoded_pkt, consumed = decode_quic_packet(packet)
-    assert isinstance(decoded_pkt, LongHeaderPacket)
-    assert decoded_pkt.packet_type == QuicPacketType.HANDSHAKE
-    assert decoded_pkt.version == QuicProtocolVersion.QUICLY
-    assert decoded_pkt.destination_cid == sample_dcid
-    assert decoded_pkt.source_cid == sample_scid
-    assert decoded_pkt.packet_number == packet_number
-    assert decoded_pkt.packet_number_length == len(encoded_pn)
-    assert len(decoded_pkt.payload) == 2
-
-def test_retry_packets():
-
-    tkn = bytes.fromhex("c5 00 7f ff 25")
-    integrity_tag = secrets.token_bytes(16)
-    retry_pkt = create_quic_packet(QuicPacketType.RETRY, sample_dcid, source_cid=sample_scid,
-                                   token=tkn,
-                                   integrity_tag=integrity_tag)
-    first_byte = retry_pkt.encode_first_byte()
-    assert "11110000" == f"{first_byte:08b}"  # bits 3-4 = RETRY, bits 5-8 unused
-    packet = retry_pkt.encode_all_bytes()
-    # print(f"\npacket = {packet.hex(' ')}")
-    check_long_header(packet, 18+len(tkn)+16, sample_dcid, sample_scid)
-    assert tkn == packet[18:18+len(tkn)]
-    assert integrity_tag == packet[-16:]
-
-    decoded_pkt, consumed = decode_quic_packet(packet)
-    assert isinstance(decoded_pkt, LongHeaderPacket)
-    assert decoded_pkt.packet_type == QuicPacketType.RETRY
-    assert decoded_pkt.version == QuicProtocolVersion.QUICLY
-    assert decoded_pkt.destination_cid == sample_dcid
-    assert decoded_pkt.source_cid == sample_scid
-    assert decoded_pkt.token == tkn
-    assert decoded_pkt.integrity_tag == integrity_tag
+    assert packet_number == int.from_bytes(packet[19 + start:19 + start + len(encoded_pn)])
 
 def test_udp_packets():
-    tkn = bytes.fromhex("c5 00 7f ff 25")
     frames, _ = parse_all_quic_frames(bytes.fromhex("01 1e"))
-    initial_pkt_w_tkn = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
-                                           token=tkn, packet_number=packet_number, payload=frames)
-    initial_encoded = initial_pkt_w_tkn.encode_all_bytes()
-    handshake_pkt = create_quic_packet(QuicPacketType.HANDSHAKE, sample_dcid, source_cid=sample_scid,
-                                       packet_number=packet_number, payload=frames)
-    handshake_encoded = handshake_pkt.encode_all_bytes()
+    initial_pkt = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
+                                     packet_number=packet_number, payload=frames)
+    initial_encoded = initial_pkt.encode_all_bytes()
 
     packets = list(decode_udp_packet(bytes(0)))
     assert len(packets) == 0
-    packets = list(decode_udp_packet(handshake_encoded))
+    packets = list(decode_udp_packet(initial_encoded))
     assert len(packets) == 1
     # ignore NUL padding:
-    packets = list(decode_udp_packet(initial_encoded + handshake_encoded + bytes.fromhex("00 00 00 00 00")))
+    packets = list(decode_udp_packet(initial_encoded + initial_encoded + bytes.fromhex("00 00 00 00 00")))
     assert len(packets) == 2
-    packets = list(decode_udp_packet(initial_encoded + bytes.fromhex("00 00 00") + handshake_encoded))
+    packets = list(decode_udp_packet(initial_encoded + bytes.fromhex("00 00 00") + initial_encoded))
     assert len(packets) == 2
