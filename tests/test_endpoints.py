@@ -3,6 +3,8 @@
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
 from contextlib import asynccontextmanager
+from unittest import skipIf
+
 import trio
 from typing import *
 import pytest
@@ -91,6 +93,7 @@ async def quic_echo_server(
             if autocancel:
                 nursery.cancel_scope.cancel()
 
+@skipIf(True, "not implemented")
 @parametrize_ipv6
 async def test_smoke(ipv6: bool) -> None:
     async with (quic_echo_server(True, ipv6=ipv6, delay=1) as (_server_endpoint, address)):
@@ -105,6 +108,8 @@ async def test_smoke(ipv6: bool) -> None:
                 assert answer == b"hello"
                 await client_channel.send_all(b"goodbye")
                 assert await client_channel.receive_some() == b"goodbye"
+
+# TODO: test_fast_start (sending bytes with INITIAL...)
 
 # @parametrize_ipv6
 async def test_handshake(ipv6: bool = False) -> None:

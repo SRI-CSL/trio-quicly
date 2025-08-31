@@ -1,10 +1,10 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-
 from contextlib import contextmanager, suppress
 import errno
 import logging
+import secrets
 import trio
 from types import TracebackType
 from typing import *
@@ -12,14 +12,13 @@ import warnings
 import weakref
 
 from .configuration import QuicConfiguration
-from .connection import SimpleQuicConnection, ConnectionState
+from .connection import SimpleQuicConnection, ConnectionState, get_dcid_from_header
 from .exceptions import QuicProtocolError
 from .packet import MAX_UDP_PACKET_SIZE
 from .utils import _Queue, AddressFormat, PosArgsT
-
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
-logger = logging.getLogger("trioquic")
+logger = logging.getLogger("quicly")
 
 @contextmanager
 def _translate_socket_errors_to_stream_errors() -> Generator[None, None, None]:
@@ -64,6 +63,7 @@ class QuicEndpoint:
             self,
             socket: trio.socket.SocketType,
             *,
+            connection_id_length: int = 5,
             incoming_packets_buffer: int = 10,
     ):
         # for __del__, in case the next line raises
@@ -75,6 +75,7 @@ class QuicEndpoint:
         self._initialized = True
         self.socket: trio.socket.SocketType = socket
 
+        self.connection_id_length = connection_id_length
         self.incoming_packets_buffer = incoming_packets_buffer
         self._token = trio.lowlevel.current_trio_token()
         self.new_connections_q = _Queue[tuple[bytes, tuple[str, int]]](float("inf"))
@@ -82,8 +83,8 @@ class QuicEndpoint:
 
         # We don't need to track handshaking vs non-handshake connections
         # separately. We only keep one connection per remote address.
-        # {remote address: QUIC connection}
-        self.connections: dict[AddressFormat, SimpleQuicConnection] = {}
+        # {destination CID: QUIC connection}
+        self._connections: dict[bytes, SimpleQuicConnection] = {}
 
         self._send_lock = trio.Lock()
         self._closed = False
@@ -129,7 +130,7 @@ class QuicEndpoint:
         """
         self._closed = True
         self.socket.close()
-        for stream in list(self.connections.values()):
+        for stream in list(self._connections.values()):
             stream.close()
         self.new_connections_q.r.close()  # alerts anyone waiting on receive(), e.g., the server or client handshake
         self.send_q.r.close()
@@ -148,6 +149,24 @@ class QuicEndpoint:
     def _check_closed(self) -> None:
         if self._closed:
             raise trio.ClosedResourceError
+
+    async def datagram_received(self, udp_packet: bytes, remote_address: Any) -> None:
+        # TODO: handles anti-amplification, network path validation, and initial parsing before dispatching to the
+        #   correct connection
+
+        destination_cid = get_dcid_from_header(udp_packet, self.connection_id_length)
+        if destination_cid is None:
+            # drop (and log?) UDP packet
+            return
+        destination = self._connections.get(destination_cid, None)
+        if destination is None:
+            await self.new_connections_q.s.send((udp_packet, remote_address, destination_cid))
+        else:
+            try:
+                await destination.q.s.send(udp_packet)
+            except (trio.EndOfChannel, trio.BrokenResourceError):
+                # TODO: logging of this event?
+                del self._connections[destination_cid]
 
     # async def _send_to(self, data: bytes | bytearray | memoryview, remote_address: AddressFormat) -> None:
     #     # modeled after `trio.SocketStream.send_all()` implementation
@@ -233,15 +252,7 @@ async def quic_receive_loop(
             try:
                 if endpoint is None:
                     return
-                destination = endpoint.connections.get(address, None)
-                if destination is None:
-                    await endpoint.new_connections_q.s.send((udp_packet, address))
-                else:
-                    try:
-                        await destination.q.s.send(udp_packet)
-                    except (trio.EndOfChannel, trio.BrokenResourceError):
-                        # TODO: logging of this event?
-                        del endpoint.connections[address]
+                await endpoint.datagram_received(udp_packet, address)
             finally:
                 del endpoint
     except trio.ClosedResourceError:
@@ -306,10 +317,13 @@ class QuicServer(QuicEndpoint):
         try:
             task_status.started()
 
-            async def establish_and_handle(new_connection: SimpleQuicConnection, initial_payload: bytes) -> None:
+            async def establish_and_handle(new_connection: SimpleQuicConnection,
+                                           initial_payload: bytes,
+                                           original_destination_id) -> None:
                 if await new_connection.do_handshake(initial_payload) and not new_connection.is_closed:
                     # handshake was successful
                     assert new_connection.state == ConnectionState.ESTABLISHED
+                    assert new_connection.current_destination_cid == original_destination_id
                     with new_connection:
                         await handler(new_connection, *args)
                 # TODO: if we end up here, we should remove the connection from the endpoint's list!
@@ -317,15 +331,17 @@ class QuicServer(QuicEndpoint):
             async with trio.open_nursery() as nursery:
                 if handler_nursery is None:
                     handler_nursery = nursery
-                async for (payload, remote_address) in self.new_connections_q.r:
-                    connection = self.connections.get(remote_address, None)
+                async for (payload, remote_address, destination_cid) in self.new_connections_q.r:
+                    connection = self._connections.get(destination_cid, None)
                     if connection is None:
+                        server_config = QuicConfiguration(is_client=False)
                         connection = SimpleQuicConnection(self.send_q.s.clone(),
                                                           remote_address,
+                                                          self.connection_id_length,
                                                           self.incoming_packets_buffer,
-                                                          configuration=QuicConfiguration(is_client=False))
-                        self.connections[connection.remote_address] = connection
-                        handler_nursery.start_soon(establish_and_handle, connection, payload)
+                                                          server_config)
+                        self._connections[destination_cid] = connection
+                        handler_nursery.start_soon(establish_and_handle, connection, payload, destination_cid)
                     else:
                         await connection.q.s.send(payload)
         finally:
@@ -410,14 +426,17 @@ class QuicClient(QuicEndpoint):
         self._check_closed()
         self._ensure_receive_and_send_loops()
 
-        connection = self.connections.get(target_address, None)
-        if connection is not None:
-            # TODO: should there be anything else done here when re-using an existing connection?
-            assert connection.is_closed is False, "connect() should never return a closed connection"
-            return connection
+        # TODO: what happens if this is called twice with the same target_address, i.e., a QUIC Connection already
+        #  exists with the other end?
+        # connection = self.connections.get(target_address, None)
+        # if connection is not None:
+        #     # TODO: should there be anything else done here when re-using an existing connection?
+        #     assert connection.is_closed is False, "connect() should never return a closed connection"
+        #     return connection
 
         connection = SimpleQuicConnection(self.send_q.s.clone(),
                                           None,
+                                          self.connection_id_length,
                                           self.incoming_packets_buffer,
                                           configuration=client_configuration)
         encoded_initial_pkt = connection.init_handshake()
@@ -426,10 +445,11 @@ class QuicClient(QuicEndpoint):
         while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
             # TODO: wrap with a cancellation scope to enforce a timeout? what happens to the lock underneath??
             #  Timers: use  loss-recovery PTO if available; else a fixed small value (e.g., 200–333 ms) would work
-            (payload, remote_address) = await self.new_connections_q.r.receive()
+            (payload, remote_address, destination_cid) = await self.new_connections_q.r.receive()
             connection.remote_address = remote_address
-            self.connections[connection.remote_address] = connection
             await connection.do_handshake(payload)
+            assert connection.current_destination_cid == destination_cid
+            self._connections[connection.current_destination_cid] = connection
         if connection.is_closed:
             raise QuicProtocolError("Could not establish QUIC connection")
         return connection

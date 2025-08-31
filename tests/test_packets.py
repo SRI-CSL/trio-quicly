@@ -86,6 +86,11 @@ def test_initial_packets():
     (length, start) = decode_var_length_int(packet[19:])
     assert (length, start) == (len(encoded_pn) + 4, 1)  # payload is 4 bytes long
     assert packet_number == int.from_bytes(packet[19+start:19+start+len(encoded_pn)])
+    decoded_pkt, consumed = decode_quic_packet(packet)
+    assert isinstance(decoded_pkt, LongHeaderPacket)
+    assert consumed == len(packet)
+    assert decoded_pkt.version == QuicProtocolVersion.QUICLY
+    assert decoded_pkt.packet_number == packet_number
 
     # adding some padding of NUL bytes at the end
     decoded_pkt, consumed = decode_quic_packet(

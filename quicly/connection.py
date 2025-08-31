@@ -3,16 +3,53 @@
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
 from enum import Enum, auto
+from dataclasses import dataclass
 import secrets
 import trio
 from types import TracebackType
 from typing import *
 
 from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE, PARAM_SCHEMA
-from .frame import QuicFrame, QuicFrameType, ConfigFrame, TransportParameter
+from .frame import decode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter
 from .packet import create_quic_packet, QuicPacketType, LongHeaderPacket, \
     MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicProtocolVersion
 from .utils import _Queue, AddressFormat
+
+def get_dcid_from_header(data: bytes, cid_length: int) -> Optional[bytes]:
+    """
+    Try to parse CID from header (scid from INITIAL, dcid from 1-RTT)
+    :param data: payload bytes of a QUIC Packet
+    :return: connection ID, if parsing succeeded
+    """
+    if len(data) < 2:
+        return None
+    if data[0] & 0x80:  # long header
+        if len(data) < 5:
+            return None
+        if (data[0] & 0xFC) != 0xC0 or data[1:5] != QuicProtocolVersion.QUICLY.to_bytes(4, "big"):
+            # 1. byte did not start with "110000" or QUIC-LY version number didn't match
+            return None
+        dcid_length, _ = decode_var_length_int(data[5:])
+        if len(data) < 5 + dcid_length + 1:
+            return None
+        scid_length, _ = decode_var_length_int(data[5 + dcid_length + 1:])
+        if len(data) < 5 + dcid_length + 1 + scid_length:
+            return None
+        return data[5 + dcid_length + 2:5 + dcid_length + 2 + scid_length]
+    else:  # short header
+        if len(data) < 1 + cid_length or cid_length <= 0:
+            return None
+        if (data[0] & 0xD8) != 0x40:
+            return None
+        return data[1:1 + cid_length]
+
+
+@dataclass
+class QuicConnectionId:
+    cid: bytes
+    sequence_number: Optional[int]
+    stateless_reset_token: bytes = b""
+    was_sent: bool = False
 
 class ConnectionState(Enum):
     # client-only
@@ -31,40 +68,38 @@ class SimpleQuicConnection(trio.abc.Stream):
     def __init__(self,
                  sending_ch: trio.MemorySendChannel[tuple[bytes, tuple[str, int]]],
                  remote_address: Any,
+                 connection_id_length: int,
                  incoming_packets_buffer: int,
-                 configuration: QuicConfiguration) -> None:
+                 configuration: QuicConfiguration,
+                 ) -> None:
         """
         Connection
         : A QUIC Connection is shared state between a client and a server. Connection IDs allow Connections to migrate
         to a new network path, both as a direct choice of an endpoint and when forced by a change in a middlebox.
 
         :param configuration:
-        :param original_destination_connection_id:
-        :param retry_source_connection_id:
         """
 
         assert sending_ch is not None, "Cannot create QUIC connection without sending channel"
         self.sending_ch = sending_ch
 
         assert configuration.max_datagram_size >= SMALLEST_MAX_DATAGRAM_SIZE, (
-            "The smallest allowed maximum datagram size is "
-            f"{SMALLEST_MAX_DATAGRAM_SIZE} bytes"
+            f"The smallest allowed maximum datagram size is {SMALLEST_MAX_DATAGRAM_SIZE} bytes"
         )
         # if configuration.is_client:
-        #     assert (
-        #         original_destination_connection_id is None
-        #     ), "Cannot set original_destination_connection_id for a client"
-        #     assert (
-        #         retry_source_connection_id is None
-        #     ), "Cannot set retry_source_connection_id for a client"
+        #     assert original_destination_connection_id is None, (
+        #         "Cannot set original_destination_connection_id for a client"
+        #     )
+        # #     assert (
+        # #         retry_source_connection_id is None
+        # #     ), "Cannot set retry_source_connection_id for a client"
         # else:
-        #     assert (
-        #         original_destination_connection_id is not None
-        #     ), "original_destination_connection_id is required for a server"
-
-        # configuration
+        #     assert original_destination_connection_id is not None, (
+        #         "original_destination_connection_id is required for a server"
+        #     )
         self._configuration = configuration
         self._is_client = configuration.is_client
+
         self.remote_address: AddressFormat = remote_address
         if self._is_client:
             assert self.remote_address is None
@@ -80,15 +115,27 @@ class SimpleQuicConnection(trio.abc.Stream):
         self._closing_frame = None
         self._saw_ack_eliciting = False  # touched during closing to decide if/when to re-send close
 
-        self.q = _Queue[bytes](incoming_packets_buffer)
+        # connection IDs:
+        self._host_cids = [
+            QuicConnectionId(
+                cid=secrets.token_bytes(connection_id_length),
+                sequence_number=0,
+                stateless_reset_token=secrets.token_bytes(16) if not self._is_client else None,
+                was_sent=True,
+            )
+        ]
+        self.host_cid = self._host_cids[0].cid
+        self._host_cid_seq = 1
+        self._peer_cid = QuicConnectionId(
+            cid=secrets.token_bytes(connection_id_length),
+            sequence_number=None
+        )
+        self._peer_cid_available: List[QuicConnectionId] = []
+        self._peer_cid_sequence_numbers: Set[int] = {0}
+        self._peer_retire_prior_to = 0
+        self._packet_number = 0
 
-        # # client- and server-specific configurations:
-        # if self._is_client:
-        #     self._original_destination_connection_id = original_destination_connection_id #TODO: self._peer_cid.cid
-        # else:
-        #     self._original_destination_connection_id = (
-        #         original_destination_connection_id
-        #     )
+        self.q = _Queue[bytes](incoming_packets_buffer)
 
     @property
     def configuration(self) -> QuicConfiguration:
@@ -144,14 +191,13 @@ class SimpleQuicConnection(trio.abc.Stream):
         await trio.lowlevel.checkpoint()
 
     def init_handshake(self) -> bytes:
-        self.configuration.source_cid = secrets.token_bytes(5)  # in QUIC Illustrated seems to be only 5 bytes
         ts = [TransportParameter(*tp) for tp in self.configuration.transport_parameters.as_list(exclude_defaults=True)]
         client_config_frame = QuicFrame(QuicFrameType.CONFIG,
                                         content=ConfigFrame(ts))
         client_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
-                                                destination_cid=secrets.token_bytes(8),
-                                                source_cid=self.configuration.source_cid,
-                                                packet_number=0,  # TODO: keep track in connection status
+                                                destination_cid=b'',  # don't need initial random bits in QUIC-LY!
+                                                source_cid=self.host_cid,
+                                                packet_number=self._packet_number,  # TODO: increment!
                                                 payload=[client_config_frame])
         # Any datagram sent by the client that contains an Initial packet must be padded to a length of
         # INITIAL_PADDING_TARGET bytes. This library does it by appending nul bytes to the datagram.
@@ -159,7 +205,7 @@ class SimpleQuicConnection(trio.abc.Stream):
             self.configuration.transport_parameters.initial_padding_target, b'\x00')
 
     async def do_handshake(self, hello_payload: bytes, *, initial_retransmit_timeout: float = 1.0,
-                           data_payload: bytes = None) -> bytes:
+                           data_payload: bytes = None) -> bool:
         """Perform the handshake.
 
         It's safe to call this multiple times, or call it simultaneously from multiple
@@ -201,8 +247,8 @@ class SimpleQuicConnection(trio.abc.Stream):
                 assert isinstance(server_initial_pkt, LongHeaderPacket)
                 assert server_initial_pkt.packet_type == QuicPacketType.INITIAL
                 assert server_initial_pkt.packet_number == 0
-                assert server_initial_pkt.destination_cid == self.configuration.source_cid  # TODO: turn into status?
-                self.configuration.destination_cid = server_initial_pkt.source_cid
+                assert server_initial_pkt.destination_cid == self.host_cid  # TODO: turn into status?
+                self.current_destination_cid = server_initial_pkt.source_cid
                 assert len(server_initial_pkt.payload) > 0
 
                 # find last CONFIG_ACK frame in payload:
@@ -244,7 +290,7 @@ class SimpleQuicConnection(trio.abc.Stream):
                     # TODO: logging, error handling
                     return False
                 # TODO: keep track of packet number...
-                self.configuration.destination_cid = client_initial_pkt.source_cid
+                self.current_destination_cid = client_initial_pkt.source_cid
                 assert len(client_initial_pkt.payload) > 0
 
                 # find last CONFIG frame in payload:
