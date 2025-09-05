@@ -1,15 +1,14 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-from contextlib import contextmanager, suppress
+import math
+from contextlib import contextmanager, suppress, asynccontextmanager
 import errno
 import logging
-import secrets
 import trio
 from types import TracebackType
 from typing import *
 import warnings
-import weakref
 
 from .configuration import QuicConfiguration
 from .connection import SimpleQuicConnection, ConnectionState, get_dcid_from_header
@@ -77,35 +76,79 @@ class QuicEndpoint:
 
         self.connection_id_length = connection_id_length
         self.incoming_packets_buffer = incoming_packets_buffer
-        self._token = trio.lowlevel.current_trio_token()
-        self.new_connections_q = _Queue[tuple[bytes, tuple[str, int]]](float("inf"))
-        self.send_q = _Queue[tuple[bytes, tuple[str, int]]](0)  # unbuffered sending Q for tuples (UDP payload, remote address)
+        self._token = trio.lowlevel.current_trio_token()  # TODO: still needed?
+
+        self._new_connections_q = _Queue[tuple[bytes, tuple[str, int], bytes]](float("inf"))
+        self._send_q = _Queue[tuple[bytes, tuple[str, int]]](0)  # unbuffered sending Q for tuples (UDP payload, remote address)
 
         # We don't need to track handshaking vs non-handshake connections
         # separately. We only keep one connection per remote address.
         # {destination CID: QUIC connection}
         self._connections: dict[bytes, SimpleQuicConnection] = {}
 
-        self._send_lock = trio.Lock()
         self._closed = False
         self._loops_spawned = False
 
-    def _ensure_receive_and_send_loops(self) -> None:
-        # We have to spawn this lazily, because on Windows it will immediately error out
-        # if the socket isn't already bound -- which for clients might not happen until
-        # after we send our first packet.
+    def start_endpoint(self, nursery: trio.Nursery) -> None:
         if not self._loops_spawned:
-            trio.lowlevel.spawn_system_task(
-                quic_receive_loop,
-                weakref.ref(self),
-                self.socket,
-            )
-            trio.lowlevel.spawn_system_task(
-                quic_send_loop,
-                weakref.ref(self),
-                self.socket,
-            )
+            nursery.start_soon(self._recv_loop)
+            nursery.start_soon(self._send_loop)
             self._loops_spawned = True
+
+    async def _send_loop(self) -> None:
+        try:
+            async with self._send_q.r:
+                async for (udp_payload, remote_address) in self._send_q.r:
+                    # modeled after `trio.SocketStream.send_all()` implementation
+                    with _translate_socket_errors_to_stream_errors():
+                        with memoryview(udp_payload) as data:
+                            if not data:
+                                if self.socket.fileno() == -1:
+                                    raise trio.ClosedResourceError("socket was already closed")
+                                await trio.lowlevel.checkpoint()
+                                continue
+                            total_sent = 0
+                            while total_sent < len(data):
+                                with data[total_sent:] as remaining:
+                                    sent = await self.socket.sendto(remaining, remote_address)
+                                total_sent += sent
+        except trio.ClosedResourceError:
+            # socket was closed
+            return
+        except OSError as exc:
+            if exc.errno in (errno.EBADF, errno.ENOTSOCK):
+                # socket was closed
+                return
+            else:  # pragma: no cover
+                raise  # ??? shouldn't happen
+
+    async def _recv_loop(self) -> None:
+        try:
+            while True:
+                try:
+                    udp_packet, address = await self.socket.recvfrom(MAX_UDP_PACKET_SIZE)
+                    print(f"\nrecvfrom: {udp_packet!r} from {address}")
+                except OSError as exc:
+                    if exc.errno == errno.ECONNRESET:
+                        # Windows only: "On a UDP-datagram socket [ECONNRESET]
+                        # indicates a previous send operation resulted in an ICMP Port
+                        # Unreachable message" -- https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recvfrom
+                        #
+                        # This is totally useless -- there's nothing we can do with this
+                        # information. So we just ignore it and retry the recv.
+                        continue
+                    else:
+                        raise
+                await self._datagram_received(udp_packet, address)
+        except trio.ClosedResourceError:
+            # socket was closed
+            return
+        except OSError as exc:
+            if exc.errno in (errno.EBADF, errno.ENOTSOCK):
+                # socket was closed
+                return
+            else:  # pragma: no cover
+                raise exc  # ??? shouldn't happen
 
     def __del__(self) -> None:
         # Do nothing if this object was never fully constructed
@@ -132,8 +175,8 @@ class QuicEndpoint:
         self.socket.close()
         for stream in list(self._connections.values()):
             stream.close()
-        self.new_connections_q.r.close()  # alerts anyone waiting on receive(), e.g., the server or client handshake
-        self.send_q.r.close()
+        self._new_connections_q.r.close()  # alerts anyone waiting on receive(), e.g., the server or client handshake
+        self._send_q.r.close()
 
     def __enter__(self) -> Self:
         return self
@@ -150,23 +193,24 @@ class QuicEndpoint:
         if self._closed:
             raise trio.ClosedResourceError
 
-    async def datagram_received(self, udp_packet: bytes, remote_address: Any) -> None:
+    async def _datagram_received(self, udp_payload: bytes, remote_address: Any) -> None:
         # TODO: handles anti-amplification, network path validation, and initial parsing before dispatching to the
         #   correct connection
 
-        destination_cid = get_dcid_from_header(udp_packet, self.connection_id_length)
+        destination_cid = get_dcid_from_header(udp_payload, self.connection_id_length)
         if destination_cid is None:
-            # drop (and log?) UDP packet
+            # drop (and log?) UDP packet as it wasn't formatted for QUIC
             return
         destination = self._connections.get(destination_cid, None)
         if destination is None:
-            await self.new_connections_q.s.send((udp_packet, remote_address, destination_cid))
+            await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
-            try:
-                await destination.q.s.send(udp_packet)
-            except (trio.EndOfChannel, trio.BrokenResourceError):
-                # TODO: logging of this event?
-                del self._connections[destination_cid]
+            await destination.on_rx(udp_payload, remote_address)
+            # try:
+            #     await destination.q.s.send(udp_payload)
+            # except (trio.EndOfChannel, trio.BrokenResourceError):
+            #     # TODO: logging of this event?
+            #     del self._connections[destination_cid]
 
     # async def _send_to(self, data: bytes | bytearray | memoryview, remote_address: AddressFormat) -> None:
     #     # modeled after `trio.SocketStream.send_all()` implementation
@@ -191,80 +235,80 @@ class QuicEndpoint:
     #         with _translate_socket_errors_to_stream_errors():
     #             await self.socket.wait_writable()
 
-async def quic_send_loop(
-        endpoint_ref: weakref.ReferenceType[QuicEndpoint],
-        udp_socket: trio.socket.SocketType,
-) -> None:
-    try:
-        endpoint = endpoint_ref()
-        try:
-            if endpoint is None:
-                return
-            async with endpoint.send_q.r:
-                async for (udp_payload, remote_address) in endpoint.send_q.r:
-                    # modeled after `trio.SocketStream.send_all()` implementation
-                    with _translate_socket_errors_to_stream_errors():
-                        with memoryview(udp_payload) as data:
-                            if not data:
-                                if udp_socket.fileno() == -1:
-                                    raise trio.ClosedResourceError("socket was already closed")
-                                await trio.lowlevel.checkpoint()
-                                continue
-                            total_sent = 0
-                            while total_sent < len(data):
-                                with data[total_sent:] as remaining:
-                                    sent = await udp_socket.sendto(remaining, remote_address)
-                                total_sent += sent
-        finally:
-            del endpoint
-    except trio.ClosedResourceError:
-        # socket was closed
-        return
-    except OSError as exc:
-        if exc.errno in (errno.EBADF, errno.ENOTSOCK):
-            # socket was closed
-            return
-        else:  # pragma: no cover
-            # ??? shouldn't happen
-            raise
-
-async def quic_receive_loop(
-    endpoint_ref: weakref.ReferenceType[QuicEndpoint],
-    udp_socket: trio.socket.SocketType,
-) -> None:
-    try:
-        while True:
-            try:
-                udp_packet, address = await udp_socket.recvfrom(MAX_UDP_PACKET_SIZE)
-                print(f"\nrecvfrom: {udp_packet!r} from {address}")
-            except OSError as exc:
-                if exc.errno == errno.ECONNRESET:
-                    # Windows only: "On a UDP-datagram socket [ECONNRESET]
-                    # indicates a previous send operation resulted in an ICMP Port
-                    # Unreachable message" -- https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recvfrom
-                    #
-                    # This is totally useless -- there's nothing we can do with this
-                    # information. So we just ignore it and retry the recv.
-                    continue
-                else:
-                    raise
-            endpoint = endpoint_ref()
-            try:
-                if endpoint is None:
-                    return
-                await endpoint.datagram_received(udp_packet, address)
-            finally:
-                del endpoint
-    except trio.ClosedResourceError:
-        # socket was closed
-        return
-    except OSError as exc:
-        if exc.errno in (errno.EBADF, errno.ENOTSOCK):
-            # socket was closed
-            return
-        else:  # pragma: no cover
-            # ??? shouldn't happen
-            raise exc
+# async def quic_send_loop(
+#         endpoint_ref: weakref.ReferenceType[QuicEndpoint],
+#         udp_socket: trio.socket.SocketType,
+# ) -> None:
+#     try:
+#         endpoint = endpoint_ref()
+#         try:
+#             if endpoint is None:
+#                 return
+#             async with endpoint.send_q.r:
+#                 async for (udp_payload, remote_address) in endpoint.send_q.r:
+#                     # modeled after `trio.SocketStream.send_all()` implementation
+#                     with _translate_socket_errors_to_stream_errors():
+#                         with memoryview(udp_payload) as data:
+#                             if not data:
+#                                 if udp_socket.fileno() == -1:
+#                                     raise trio.ClosedResourceError("socket was already closed")
+#                                 await trio.lowlevel.checkpoint()
+#                                 continue
+#                             total_sent = 0
+#                             while total_sent < len(data):
+#                                 with data[total_sent:] as remaining:
+#                                     sent = await udp_socket.sendto(remaining, remote_address)
+#                                 total_sent += sent
+#         finally:
+#             del endpoint
+#     except trio.ClosedResourceError:
+#         # socket was closed
+#         return
+#     except OSError as exc:
+#         if exc.errno in (errno.EBADF, errno.ENOTSOCK):
+#             # socket was closed
+#             return
+#         else:  # pragma: no cover
+#             # ??? shouldn't happen
+#             raise
+#
+# async def quic_receive_loop(
+#     endpoint_ref: weakref.ReferenceType[QuicEndpoint],
+#     udp_socket: trio.socket.SocketType,
+# ) -> None:
+#     try:
+#         while True:
+#             try:
+#                 udp_packet, address = await udp_socket.recvfrom(MAX_UDP_PACKET_SIZE)
+#                 print(f"\nrecvfrom: {udp_packet!r} from {address}")
+#             except OSError as exc:
+#                 if exc.errno == errno.ECONNRESET:
+#                     # Windows only: "On a UDP-datagram socket [ECONNRESET]
+#                     # indicates a previous send operation resulted in an ICMP Port
+#                     # Unreachable message" -- https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recvfrom
+#                     #
+#                     # This is totally useless -- there's nothing we can do with this
+#                     # information. So we just ignore it and retry the recv.
+#                     continue
+#                 else:
+#                     raise
+#             endpoint = endpoint_ref()
+#             try:
+#                 if endpoint is None:
+#                     return
+#                 await endpoint.datagram_received(udp_packet, address)
+#             finally:
+#                 del endpoint
+#     except trio.ClosedResourceError:
+#         # socket was closed
+#         return
+#     except OSError as exc:
+#         if exc.errno in (errno.EBADF, errno.ENOTSOCK):
+#             # socket was closed
+#             return
+#         else:  # pragma: no cover
+#             # ??? shouldn't happen
+#             raise exc
 
 @final
 class QuicServer(QuicEndpoint):
@@ -312,95 +356,50 @@ class QuicServer(QuicEndpoint):
 
         """
         self._check_closed()
-        self._ensure_receive_and_send_loops()
 
         try:
             task_status.started()
 
-            async def establish_and_handle(new_connection: SimpleQuicConnection,
-                                           initial_payload: bytes,
-                                           original_destination_id) -> None:
-                if await new_connection.do_handshake(initial_payload) and not new_connection.is_closed:
-                    # handshake was successful
-                    assert new_connection.state == ConnectionState.ESTABLISHED
-                    assert new_connection.current_destination_cid == original_destination_id
-                    with new_connection:
-                        await handler(new_connection, *args)
+            async def handle_connection(new_connection: SimpleQuicConnection) -> None:
+                with new_connection:
+                    await handler(new_connection, *args)
                 # TODO: if we end up here, we should remove the connection from the endpoint's list!
 
             async with trio.open_nursery() as nursery:
+                self.start_endpoint(nursery)
                 if handler_nursery is None:
                     handler_nursery = nursery
-                async for (payload, remote_address, destination_cid) in self.new_connections_q.r:
+                async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
                     connection = self._connections.get(destination_cid, None)
                     if connection is None:
                         server_config = QuicConfiguration(is_client=False)
-                        connection = SimpleQuicConnection(self.send_q.s.clone(),
+                        connection = SimpleQuicConnection(self._send_q.s.clone(),
                                                           remote_address,
                                                           self.connection_id_length,
                                                           self.incoming_packets_buffer,
                                                           server_config)
-                        self._connections[destination_cid] = connection
-                        handler_nursery.start_soon(establish_and_handle, connection, payload, destination_cid)
+                        if await connection.do_handshake(payload) and not connection.is_closed:
+                            # handshake was successful
+                            assert connection.state == ConnectionState.ESTABLISHED
+                            assert connection.peer_cid.cid == destination_cid
+                            self._connections[destination_cid] = connection
+                            handler_nursery.start_soon(handle_connection, connection)
                     else:
-                        await connection.q.s.send(payload)
+                        await connection.on_rx(payload, remote_address)
+                        # await connection.q.s.send(payload)
         finally:
             pass  # TODO: any other cleanup duties here?
-
-# @final
-# class QuicListener(trio.abc.Listener[SimpleQuicConnection],QuicEndpoint):
-#     """A :class:`~trio.abc.Listener` that uses a bound UDP socket to accept
-#     incoming connections as :class:`SimpleQuicConnection` objects.  It is
-#     a QUIC endpoint server object.
-#
-#     Args:
-#       bound_socket: The Trio socket object to wrap. Must have type ``SOCK_DGRAM``,
-#           and be bound.
-#
-#     Note that the :class:`QuicListener` "takes ownership" of the given
-#     socket; closing the :class:`QuicListener` will also close the socket.
-#
-#     .. attribute:: socket
-#
-#        The Trio socket object that this stream wraps.
-#
-#     """
-#     def __init__(self, bound_socket: trio.socket.SocketType) -> None:
-#         QuicEndpoint.__init__(self, bound_socket)
-#         # TODO: how to check that UDP socket is bound?
-#         # try:
-#         #     listening = socket.getsockopt(tsocket.SOL_SOCKET, tsocket.SO_ACCEPTCONN)
-#         # except OSError:
-#         #     # SO_ACCEPTCONN fails on macOS; we just have to trust the user.
-#         #     pass
-#         # else:
-#         #     if not listening:
-#         #         raise ValueError("QuicListener requires a bound socket")
-#         self.accept_send_ch, self._accept_recv_ch = trio.open_memory_channel(0)
-#
-#     async def aclose(self) -> None:
-#         """Close this listener and its underlying socket."""
-#         print(f"QuicListener.aclose() called")
-#         self.socket.close()
-#         await trio.lowlevel.checkpoint()
-#
-#     async def accept(self) -> SimpleQuicConnection:
-#         self._ensure_receive_loop()
-#         with self._accept_recv_ch.clone() as new_client:
-#             client_address = await new_client.receive()
-#             connection = SimpleQuicConnection(self, client_address, configuration=QuicConfiguration(is_client=False))
-#             self.connections[client_address] = connection
-#             print(f"new connection from {client_address} accepted!")
-#             return connection
 
 @final
 class QuicClient(QuicEndpoint):
 
+    @asynccontextmanager
     async def connect(
         self,
         target_address: AddressFormat,  # could be 2-tuple (IPv4) or 4-tuple (IPv6)
-        client_configuration: Optional[QuicConfiguration] = None,
-    ) -> SimpleQuicConnection:
+        client_configuration: QuicConfiguration | None = None,
+        connection_established_timeout: float = math.inf,  # TODO: establish default of 5-10s?
+    ) -> AsyncGenerator[SimpleQuicConnection, Any]:
         """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
         is based on UDP, we cannot reliably resolve the remote address until after receiving
         the first reply.
@@ -418,38 +417,44 @@ class QuicClient(QuicEndpoint):
             does not resolve to localhost as a remote address.  Use the IPv6 wildcard address
             "::" only for servers that bind to them to all interfaces on localhost.
           client_configuration: The client configuration to use (or None for default values)
+          connection_established_timeout: how many seconds before giving up on initial connection establishment.
 
         Returns:
           SimpleQuicConnection
 
         """
         self._check_closed()
-        self._ensure_receive_and_send_loops()
 
-        # TODO: what happens if this is called twice with the same target_address, i.e., a QUIC Connection already
-        #  exists with the other end?
-        # connection = self.connections.get(target_address, None)
-        # if connection is not None:
-        #     # TODO: should there be anything else done here when re-using an existing connection?
-        #     assert connection.is_closed is False, "connect() should never return a closed connection"
-        #     return connection
+        async with trio.open_nursery() as nursery:
+            self.start_endpoint(nursery)
 
-        connection = SimpleQuicConnection(self.send_q.s.clone(),
-                                          None,
-                                          self.connection_id_length,
-                                          self.incoming_packets_buffer,
-                                          configuration=client_configuration)
-        encoded_initial_pkt = connection.init_handshake()
-        await self.send_q.s.send((encoded_initial_pkt, target_address))
-        connection.state = ConnectionState.WAIT_FIRST
-        while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
-            # TODO: wrap with a cancellation scope to enforce a timeout? what happens to the lock underneath??
-            #  Timers: use  loss-recovery PTO if available; else a fixed small value (e.g., 200–333 ms) would work
-            (payload, remote_address, destination_cid) = await self.new_connections_q.r.receive()
-            connection.remote_address = remote_address
-            await connection.do_handshake(payload)
-            assert connection.current_destination_cid == destination_cid
-            self._connections[connection.current_destination_cid] = connection
-        if connection.is_closed:
-            raise QuicProtocolError("Could not establish QUIC connection")
-        return connection
+            connection = SimpleQuicConnection(self._send_q.s.clone(),
+                                              target_address,
+                                              self.connection_id_length,
+                                              self.incoming_packets_buffer,
+                                              configuration=client_configuration)
+            connection.start_background(nursery)
+
+            with trio.move_on_after(connection_established_timeout) as cancel_scope:
+                connection.state = ConnectionState.WAIT_FIRST
+                while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
+                    initial_pkt = connection.init_handshake()
+                    await connection.on_tx(initial_pkt)  # this arms initial PTO timer
+                    (payload, remote_address, destination_cid) = await self._new_connections_q.r.receive()
+                    if await connection.do_handshake(payload):
+                        connection.remote_address = remote_address
+                        assert connection.peer_cid.cid == destination_cid
+                        self._connections[destination_cid] = connection
+                        break
+                    # handshake unsuccessful: wait for PTO timer to wake?
+                    await trio.sleep_forever()
+            if connection.is_closed or cancel_scope.cancelled_caught:
+                raise QuicProtocolError("Could not establish QUIC connection")
+
+            try:
+                yield connection  # give caller control; loops continue running in the nursery
+            finally:
+                # on context exit: cancel everything cleanly
+                nursery.cancel_scope.cancel()
+                await connection.aclose()
+

@@ -261,6 +261,80 @@ QUIC-LY uses connection- and stream-level flow control as in {{RFC9000}} with li
 
 QUIC-LY adopts the algorithms and timers of {{RFC9002}}. ACK generation, ACK delay, probe timeouts, and packet number spaces follow QUIC norms, minus cryptographic key phases.
 
+
+# Handshake Timers and Timeouts {#handshake-timers}
+
+This section defines QUIC-LY’s handshake reliability and timeout behavior. It is aligned with QUIC’s
+loss-detection timers {{RFC9002}} and the idle timeout and closing/draining semantics in {{RFC9000}},
+adapted to QUIC-LY’s TLS-free setup.
+
+## Probe Timeout (PTO) for the Initial Packet Number Space
+
+Endpoints maintain a **Probe Timeout (PTO)** for the **Initial** packet number space. Before any RTT
+sample is available, endpoints **MUST** use:
+
+* `initial_rtt = 333 ms` (as in QUIC),
+* `max_ack_delay = 0 ms` for the Initial space (to avoid handshake deadlock).
+
+PTO is computed as in {{RFC9002}}:
+
+~~~
+PTO = SRTT + max(4 * RTTVAR, kGranularity) + max_ack_delay
+~~~
+
+with a small `kGranularity` (e.g., 1–10 ms). While in the Initial space, `max_ack_delay = 0`.
+
+A PTO **MUST** be armed whenever there are **ack-eliciting Initial packets in flight** and no ACK has
+yet been received that newly acknowledges at least one of them.
+
+## What to Send When PTO Fires
+
+When the Initial-space PTO expires, the endpoint **MUST** send an **ack-eliciting Initial** packet
+(one or more “probe” packets). In QUIC-LY, the probe **SHOULD** be a retransmission of the most
+recent **CONFIG** frame (idempotent), optionally with **PADDING** up to the current
+`initial_padding_target` (Section {{transport-parameters-tlvs}}).
+
+On consecutive PTO expirations without receiving an ACK, the PTO **MUST** be **exponentially backed
+off** (doubled) per {{RFC9002}}.
+
+## Handshake Completion
+
+An endpoint leaves the handshake phase and enters **ESTABLISHED** as follows:
+
+* **Client**: when it has (1) received an **ACK** covering the client’s Initial and (2) processed the
+  server’s **CONFIG-ACK**. If the server does not send CONFIG-ACK, the client **MAY** proceed using
+  defaults after the first server response.
+* **Server**: after sending **ACK** (for the client Initial) and **CONFIG-ACK** (if any).
+
+Upon entering ESTABLISHED, endpoints **SHOULD** discard the Initial packet number space and send
+Short Header packets.
+
+## Handshake Timeout (Give-up Policy)
+
+QUIC does not specify a fixed “handshake timeout.” For QUIC-LY, an endpoint **SHOULD** abort
+the handshake if it has not reached ESTABLISHED after either of the following, **whichever occurs
+first**:
+
+* **N** consecutive Initial-space PTO expirations (**RECOMMENDED** `N = 7`), or
+* elapsed time exceeding the endpoint’s configured **`idle_timeout_ms`** transport parameter.
+
+To abort, the endpoint **SHOULD** send **CONNECTION_CLOSE** (with an appropriate error code) and
+enter **DRAINING**.
+
+## Interaction with Closing and Draining
+
+If an endpoint **initiates close** at any time, it sends **CONNECTION_CLOSE**, enters **CLOSING**, and
+sends no new application data. During CLOSING it **MAY** retransmit CONNECTION_CLOSE in response to
+incoming ack-eliciting packets. After a short deadline (e.g., **3 × PTO**), it **MUST** enter
+**DRAINING** and send nothing further. If an endpoint **receives** a CONNECTION_CLOSE at any time,
+it **MUST** immediately enter **DRAINING** and send nothing further until the drain period ends.
+
+## Idle Timeout
+
+Independently of the above, if no ack-eliciting packets are received for longer than
+**`idle_timeout_ms`**, the endpoint **MAY** silently close the connection.
+
+
 # Error Handling
 
 QUIC-LY reuses QUIC Transport error codes where applicable. The following additional error codes are defined for CONNECTION_CLOSE (and potentially application close), encoded as QUIC varints:

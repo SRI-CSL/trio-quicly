@@ -1,6 +1,7 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+from contextlib import asynccontextmanager
 
 import trio
 from typing import *
@@ -33,12 +34,14 @@ def format_host_port(host: str | bytes, port: int) -> str:
     else:
         return f"{host}:{port}"
 
+
+@asynccontextmanager
 async def open_quic_connection(
         host: str | bytes,
         port: int,
         *,
         configuration: Optional[QuicConfiguration] = None,
-) -> SimpleQuicConnection:
+) -> AsyncGenerator[SimpleQuicConnection, Any]:
     """
     Connect to the given host and port over QUIC.
 
@@ -85,4 +88,5 @@ async def open_quic_connection(
     # client_socket.setsockopt(trio.socket.IPPROTO_IPV6, trio.socket.IPV6_V6ONLY, 0)
 
     client = QuicClient(client_socket)
-    return await client.connect(winning_address, client_configuration)
+    async with client.connect(winning_address, client_configuration) as connection:
+        yield cast(SimpleQuicConnection, connection)

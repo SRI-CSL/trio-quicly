@@ -9,7 +9,8 @@ from enum import IntEnum
 from typing import *
 
 from .exceptions import QuicProtocolViolation
-from .frame import encode_var_length_int, decode_var_length_int, QuicFrame, parse_all_quic_frames
+from .frame import encode_var_length_int, decode_var_length_int, QuicFrame, parse_all_quic_frames, \
+    NON_ACK_ELICITING_FRAME_TYPES
 
 MAX_UDP_PACKET_SIZE = 65527
 
@@ -85,6 +86,10 @@ class QuicPacket:
             self.packet_number_length = max(math.ceil(self.packet_number.bit_length() / 8), 1)
             assert 1 <= self.packet_number_length <= 4
         assert self.reserved_bits.bit_length() <= 2
+
+    def is_ack_eliciting(self) -> bool:
+        # Packets that contain at least one ack-eliciting frame are called ack-eliciting packets.
+        return any(getattr(f, "frame_type", f) not in NON_ACK_ELICITING_FRAME_TYPES for f in self.payload)
 
 @dataclass
 class LongHeaderPacket(QuicPacket):

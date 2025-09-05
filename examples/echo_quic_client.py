@@ -18,7 +18,7 @@ if sys.version_info < (3, 11):
 # - can't be in use by some other program on your computer
 # - must match what we set in our echo server
 PORT = 12345
-N_TRANSMISSIONS = 3
+N_TRANSMISSIONS = 2
 
 async def sender(client_stream, num: int = 0):
     print("sender: started!")
@@ -45,10 +45,9 @@ async def receiver(client_stream):
 async def parent(num: int = 0):
     host = "127.0.0.1"  # "127.0.0.1" or "0.0.0.0"  # "::1" but never wildcard address "::"
 
-    client_conn = await open_quic_connection(host, PORT)
-    print(f'Starting client {num}')
+    async with open_quic_connection(host, PORT) as client_conn:
+        print(f'Starting client {num}')
 
-    async with client_conn:
         # async with trio.open_nursery() as nursery:
         #     print(f"parent: spawning sender for client {num} ...")
         #     nursery.start_soon(sender, client_conn, num)
@@ -62,6 +61,8 @@ async def parent(num: int = 0):
 
             data = await client_conn.receive_some()
             print(f"receiver: got data {data!r}")
+
+    print(f'Stopping client {num}')
 
 
 async def two_clients():

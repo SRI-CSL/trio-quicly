@@ -126,7 +126,9 @@ class QuicFrameType(IntEnum):
         }
         return friendly_names.get(self, f"Unknown Frame (0x{self.value:02x})")
 
-
+# All other frames are considered ack-eliciting frames.  Packets that contain at least one ack-eliciting frame are
+# called ack-eliciting packets.  Ack-eliciting packets elicit an ACK or ACK_ECN frame from the receiver within a
+# maximum acknowledgement delay.
 NON_ACK_ELICITING_FRAME_TYPES = frozenset(
     [
         QuicFrameType.ACK,

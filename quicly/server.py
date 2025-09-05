@@ -168,8 +168,6 @@ async def serve_quic(
     handler_nursery: trio.Nursery | None = None,
     task_status: trio.TaskStatus[list[QuicServer]] = trio.TASK_STATUS_IGNORED,
     configuration: QuicConfiguration | None = None,
-    # session_ticket_fetcher: Optional[SessionTicketFetcher] = None,
-    # session_ticket_handler: Optional[SessionTicketHandler] = None,
     # retry: bool = False,
 ) -> None:
     """
@@ -202,6 +200,4 @@ async def serve_quic(
         # error or whatever.
         task_status.started(servers)
 
-    raise AssertionError(
-        "QuicServer.serve should never complete",
-    )
+    raise AssertionError("QuicServer.serve should never complete")

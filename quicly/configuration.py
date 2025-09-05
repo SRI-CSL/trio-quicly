@@ -75,14 +75,36 @@ class QuicLyTransportParameters:
         return [(pid, getattr(self, f)) for pid, (f, _) in PARAM_SCHEMA.items()
                 if not exclude_defaults or QUICLY_DEFAULTS[pid] != getattr(self, f)]
 
-    def update(self, new_params: dict[str, int|bool]) -> None:
+    def update(self, new_params: Mapping[Union[str, "TransportParameterType"], int | bool]) -> bool:
         """
-        Update the QUIC-LY default transport parameters in place.
+        Update the QUIC-LY transport parameters in place.
         :param new_params: Dictionary of transport parameter names and their new values.
-        :return: None
+        :return: True iff at least one value changed.
         """
-        for p_name, p_value in new_params.items():
-            setattr(self, p_name, p_value)
+        changed = False
+        for key, raw in new_params.items():
+            # Allow enum keys or field-name strings
+            name = key.name if hasattr(key, "name") else str(key)
+
+            if not hasattr(self, name):
+                continue  # ignore unkown keys
+
+            current = getattr(self, name)
+            # Normalize the incoming value to the attribute's type
+            if isinstance(current, bool):
+                new_val = bool(raw)
+            elif isinstance(current, int):
+                # Accept ints (and, if given, cast bools to ints explicitly)
+                new_val = int(raw)
+            else:
+                # Fallback (shouldn't happen for this dataclass)
+                new_val = raw
+
+            if current != new_val:
+                setattr(self, name, new_val)
+                changed = True
+        return changed
+
 
 @dataclass
 class QuicConfiguration:

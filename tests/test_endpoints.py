@@ -11,7 +11,7 @@ import pytest
 
 from quicly.configuration import QuicConfiguration
 from quicly.endpoint import QuicServer, QuicClient, QuicEndpoint
-from quicly.connection import SimpleQuicConnection
+from quicly.connection import SimpleQuicConnection, ConnectionState
 from quicly.server import open_quic_servers
 from .tutils import binds_ipv6
 
@@ -111,10 +111,11 @@ async def test_smoke(ipv6: bool) -> None:
 
 # TODO: test_fast_start (sending bytes with INITIAL...)
 
-# @parametrize_ipv6
+# TODO: @parametrize_ipv6
 async def test_handshake(ipv6: bool = False) -> None:
     async with (quic_echo_server(True, ipv6=ipv6, delay=0) as (_server_endpoint, address)):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
-            await client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
-                                 QuicConfiguration(is_client=True))
+            async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
+                                      QuicConfiguration(is_client=True)) as connection:
+                assert connection.state == ConnectionState.ESTABLISHED
