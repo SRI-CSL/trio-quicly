@@ -99,10 +99,10 @@ async def test_smoke(ipv6: bool) -> None:
     async with (quic_echo_server(True, ipv6=ipv6, delay=1) as (_server_endpoint, address)):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
-            client_channel = await client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
-                                                  QuicConfiguration(is_client=True))
-
-            async with client_channel:
+            async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
+                                      QuicConfiguration(is_client=True)) as client_channel:
+                assert client_channel.state == ConnectionState.ESTABLISHED
+                # exercise back and forth
                 await client_channel.send_all(b"hello")
                 answer = await client_channel.receive_some()
                 assert answer == b"hello"
@@ -119,3 +119,4 @@ async def test_handshake(ipv6: bool = False) -> None:
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       QuicConfiguration(is_client=True)) as connection:
                 assert connection.state == ConnectionState.ESTABLISHED
+            # TODO: check cleanly shutdown?

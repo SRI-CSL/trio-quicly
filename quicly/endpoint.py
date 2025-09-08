@@ -13,7 +13,7 @@ import warnings
 from .configuration import QuicConfiguration
 from .connection import SimpleQuicConnection, ConnectionState, get_dcid_from_header
 from .exceptions import QuicProtocolError
-from .packet import MAX_UDP_PACKET_SIZE
+from .packet import MAX_UDP_PACKET_SIZE, decode_udp_packet
 from .utils import _Queue, AddressFormat, PosArgsT
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
@@ -205,7 +205,7 @@ class QuicEndpoint:
         if destination is None:
             await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
-            await destination.on_rx(udp_payload, remote_address)
+            await destination.on_rx(list(decode_udp_packet(udp_payload)), remote_address)
             # try:
             #     await destination.q.s.send(udp_payload)
             # except (trio.EndOfChannel, trio.BrokenResourceError):
@@ -378,15 +378,17 @@ class QuicServer(QuicEndpoint):
                                                           self.connection_id_length,
                                                           self.incoming_packets_buffer,
                                                           server_config)
-                        if await connection.do_handshake(payload) and not connection.is_closed:
+                        if await connection.do_handshake(payload, remote_address) and not connection.is_closed:
                             # handshake was successful
                             assert connection.state == ConnectionState.ESTABLISHED
                             assert connection.peer_cid.cid == destination_cid
                             self._connections[destination_cid] = connection
                             handler_nursery.start_soon(handle_connection, connection)
+                        else:
+                            # couldn't find recipient connection for this payload, so silently dropping
+                            pass  # TODO: log it though?
                     else:
-                        await connection.on_rx(payload, remote_address)
-                        # await connection.q.s.send(payload)
+                        await connection.on_rx(list(decode_udp_packet(payload)), remote_address)
         finally:
             pass  # TODO: any other cleanup duties here?
 
@@ -399,6 +401,7 @@ class QuicClient(QuicEndpoint):
         target_address: AddressFormat,  # could be 2-tuple (IPv4) or 4-tuple (IPv6)
         client_configuration: QuicConfiguration | None = None,
         connection_established_timeout: float = math.inf,  # TODO: establish default of 5-10s?
+        initial_retransmit_timeout: float = 1.0,
     ) -> AsyncGenerator[SimpleQuicConnection, Any]:
         """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
         is based on UDP, we cannot reliably resolve the remote address until after receiving
@@ -409,7 +412,7 @@ class QuicClient(QuicEndpoint):
 
         TODO: For simplicity, a client can only support 1 QUIC connection.  Therefore, if this
          method is called multiple times and to different destination addresses, it will
-         silently fail... (Linda: or should it not?)
+         silently fail...
 
         Args:
           target_address: The address to connect to. Usually a (host, port) tuple, like
@@ -418,6 +421,18 @@ class QuicClient(QuicEndpoint):
             "::" only for servers that bind to them to all interfaces on localhost.
           client_configuration: The client configuration to use (or None for default values)
           connection_established_timeout: how many seconds before giving up on initial connection establishment.
+          initial_retransmit_timeout: Since UDP is an unreliable protocol, it's
+            possible that some of the packets we send during the handshake will get
+            lost. To handle this, QUIC-LY uses a timer to automatically retransmit
+            handshake packets that don't receive a response. This lets you set the
+            timeout we use to detect packet loss. Ideally, it should be set to ~1.5
+            times the round-trip time to your peer, but 1 second is a reasonable
+            default. There's `some useful guidance here
+            <https://tlswg.org/dtls13-spec/draft-ietf-tls-dtls13.html#name-timer-values>`__.
+
+            This is the *initial* timeout, because if packets keep being lost then we
+            will automatically back off to longer values, to avoid overloading the
+            network.
 
         Returns:
           SimpleQuicConnection
@@ -439,15 +454,15 @@ class QuicClient(QuicEndpoint):
                 connection.state = ConnectionState.WAIT_FIRST
                 while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
                     initial_pkt = connection.init_handshake()
-                    await connection.on_tx(initial_pkt)  # this arms initial PTO timer
+                    await connection.on_tx(initial_pkt, initial_retransmit_timeout)  # this arms initial PTO timer
                     (payload, remote_address, destination_cid) = await self._new_connections_q.r.receive()
-                    if await connection.do_handshake(payload):
-                        connection.remote_address = remote_address
+                    if await connection.do_handshake(payload, remote_address):
                         assert connection.peer_cid.cid == destination_cid
                         self._connections[destination_cid] = connection
                         break
-                    # handshake unsuccessful: wait for PTO timer to wake?
-                    await trio.sleep_forever()
+                    # handshake unsuccessful:
+                    # PTO timer will handle re-transmit, but we need to back-off with the PTO timer
+                    initial_retransmit_timeout = 2*initial_retransmit_timeout
             if connection.is_closed or cancel_scope.cancelled_caught:
                 raise QuicProtocolError("Could not establish QUIC connection")
 

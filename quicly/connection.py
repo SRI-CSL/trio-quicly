@@ -344,7 +344,7 @@ class SimpleQuicConnection(trio.abc.Stream):
                                   packet_number=self._get_and_incr_pn(QuicPacketType.INITIAL),
                                   payload=[client_config_frame])
 
-    async def on_tx(self, qpkt: QuicPacket) -> None:
+    async def on_tx(self, qpkt: QuicPacket, timeout: float = 0.0) -> None:
         data = qpkt.encode_all_bytes()
         # update sent map (for correct PN space)
         sp = SentPacket(
@@ -357,7 +357,8 @@ class SimpleQuicConnection(trio.abc.Stream):
         # if ack-eliciting: arm or re-arm PTO timer
         if sp.ack_eliciting:
             pto_timer = self.pto_timers[qpkt.packet_type]
-            pto_timer.set_timer_after(0.5)  # TODO: calculate properly and back-off if needed!
+            assert timeout > 0  # TODO: log error
+            pto_timer.set_timer_after(timeout)
         # submit to endpoint for sending as bytes payload:
         if qpkt.packet_type == QuicPacketType.INITIAL and self._is_client:
             # Any datagram sent by the client that contains an Initial packet must be padded to a length of
@@ -365,8 +366,7 @@ class SimpleQuicConnection(trio.abc.Stream):
             data = data.ljust(self.configuration.transport_parameters.initial_padding_target, b'\x00')
         await self.send_all(data)
 
-    async def do_handshake(self, hello_payload: bytes, *,
-                           initial_retransmit_timeout: float = 1.0,
+    async def do_handshake(self, hello_payload: bytes, remote_address: NetworkAddress,
                            data_payload: bytes = None) -> bool:
         """Perform the handshake.
 
@@ -374,46 +374,29 @@ class SimpleQuicConnection(trio.abc.Stream):
         tasks – the first call will perform the handshake, and the rest will be no-ops.
 
         Args:
-
           hello_payload (bytes): this encodes the INITIAL QuicPacket; if we are the
             client side, then the initial connection ID should match the payload.
             TODO: how to react if it doesn't match?
             If we are the server, then are about to respond with our INITIAL QuicPacket.
-          initial_retransmit_timeout (float): Since UDP is an unreliable protocol, it's
-            possible that some of the packets we send during the handshake will get
-            lost. To handle this, QUIC uses a timer to automatically retransmit
-            handshake packets that don't receive a response. This lets you set the
-            timeout we use to detect packet loss. Ideally, it should be set to ~1.5
-            times the round-trip time to your peer, but 1 second is a reasonable
-            default. There's `some useful guidance here
-            <https://tlswg.org/dtls13-spec/draft-ietf-tls-dtls13.html#name-timer-values>`__.
-
-            This is the *initial* timeout, because if packets keep being lost then Trio
-            will automatically back off to longer values, to avoid overloading the
-            network.
           data_payload: Optional stream or datagram payload to be sent with initial packet.
             Only useful from client side as it will be ignored from the server side.
             TODO: what does this mean for QUIC-LY? Can't we already initiate with STREAM (or DATAGRAM) payload?
 
         """
-        async with (((self._handshake_lock))):  # TODO: check await's under this for blocking this top-level with()
+        async with (self._handshake_lock):  # TODO: check await's under this for blocking this top-level with()
             if self._did_handshake:
                 return True
 
             try:
+                hello_packets = list(decode_udp_packet(hello_payload))
+                assert len(hello_packets) >= 1  # If there are more QUIC packets, silently drop them
                 if self._is_client:
-                    hello_packets = list(decode_udp_packet(hello_payload))
-                    assert len(hello_packets) >= 1  # TODO: Could there be more QUIC packets?
                     server_initial_pkt = hello_packets[0]
-                    assert isinstance(server_initial_pkt, LongHeaderPacket), "initial packet must be a long header packet"
-                    assert server_initial_pkt.packet_type == QuicPacketType.INITIAL, "initial packet type must be INITIAL"
+                    assert server_initial_pkt.packet_type == QuicPacketType.INITIAL, "while in handshake, only expect INITIAL"
                     assert server_initial_pkt.destination_cid == self.host_cid, "initial packet destination CID must be the same as my source CID"
                     assert server_initial_pkt.version == QuicProtocolVersion.QUICLY, "initial packet version must be QUICLY"
-                    assert len(server_initial_pkt.payload) > 0
-                    self.peer_cid = QuicConnectionId(server_initial_pkt.source_cid, 0, was_sent=True)
 
-                    self._pns_rx[QuicPacketType.INITIAL].note_received(server_initial_pkt.packet_number)
-                    # self._ack_needed_initial = True
+                    await self.on_rx([server_initial_pkt], remote_address)
 
                     # parse ACK frames:
                     # for ack in iter_ack_frames(server_initial_pkt.payload):  # yields ACKFrame (handles ACK_ECN too)
@@ -436,11 +419,10 @@ class SimpleQuicConnection(trio.abc.Stream):
                                                            spin_bit=False, key_phase=False,
                                                            packet_number=0,
                                                            payload=[QuicFrame(QuicFrameType.PADDING)])
-                        await self.on_tx(client_packet)
+                        await self.on_tx(client_packet, 2.0)  # TODO: calculate proper PTO
 
                 else:  # server-side of handshake
-                    client_initial_pkt = next(decode_udp_packet(hello_payload))
-                    assert isinstance(client_initial_pkt, LongHeaderPacket), "initial packet must be a long header packet"
+                    client_initial_pkt = hello_packets[0]
                     assert client_initial_pkt.packet_type == QuicPacketType.INITIAL, "initial packet type must be INITIAL"
                     if client_initial_pkt.version != QuicProtocolVersion.QUICLY:
                         # If a server refuses to accept a new connection, it SHOULD send an Initial packet containing
@@ -453,17 +435,13 @@ class SimpleQuicConnection(trio.abc.Stream):
                                                          packet_number=0,
                                                          payload=[QuicFrame(QuicFrameType.TRANSPORT_CLOSE,
                                                                             content=refused_frame)])
-                        await self.on_tx(refused_pkt)
+                        await self.on_tx(refused_pkt)  # not ack-eliciting, so no timeout needed
                         return False
-                    assert len(client_initial_pkt.payload) > 0, "initial packet payload must be non-empty"
 
-                    # TODO: this is the same for client: factor out into def _on_initial_rx()...
-                    self.peer_cid = QuicConnectionId(client_initial_pkt.source_cid, 0, was_sent=True)
-                    pns = self._pns_rx[QuicPacketType.INITIAL]
-                    pns.note_received(client_initial_pkt.packet_number)
+                    await self.on_rx([client_initial_pkt], remote_address)
 
                     # ACK immediately: Cap ranges to something reasonable; 8 is fine
-                    payload = [pns.to_ack_frame(
+                    payload = [self._pns_rx[QuicPacketType.INITIAL].to_ack_frame(
                         frame_type=QuicFrameType.ACK,
                         ack_delay_us=8,  # must be >= 8
                         max_ranges=8,
@@ -488,27 +466,40 @@ class SimpleQuicConnection(trio.abc.Stream):
                                                             source_cid=self.host_cid,
                                                             packet_number=self._get_and_incr_pn(QuicPacketType.INITIAL),
                                                             payload=payload)
-                    await self.on_tx(server_initial_pkt)
+                    await self.on_tx(server_initial_pkt, 2.0)  # TODO: calculate from RTT for ONE_RTT space!
 
-            except AssertionError:
+            except AssertionError as ae:
+                raise ae  # TODO: remove after testing
                 # TODO: turn assertion errors into PROTOCOL_VIOLATION, QLog?
                 return False
+            self.remote_address = remote_address  # potentially overwrite client's initial target address
             self.state = ConnectionState.ESTABLISHED
             self._did_handshake = True
             return True
 
-    async def on_rx(self, udp_payload: bytes, remote_addr: NetworkAddress = None) -> None:
+    async def on_rx(self, quic_packets: List[QuicPacket], remote_addr: NetworkAddress = None) -> None:
         """
         Parse UDP payload into QUIC packets and frames to be handled.  Payload of any STREAM or DATAGRAM frames then
         gets forwarded to self.q.s.send(payload) for users of this QUIC connection to receive data.
         """
         # TODO: check network path with `remote_addr`?
 
-        for quic_packet in list(decode_udp_packet(udp_payload)):
+        for qp in quic_packets:
             # housekeeping with QUIC header info:
-            assert quic_packet.destination_cid == self.host_cid  # TODO: once we migrate or have more CIDs...
-            assert quic_packet.packet_type == QuicPacketType.ONE_RTT
-            self._rtt_rx.note_received(quic_packet.packet_number)
+            if not (qp.packet_type == QuicPacketType.INITIAL and not self._is_client):
+                # INITIAL at server has not established CID:
+                assert qp.destination_cid == self.host_cid  # TODO: once we migrate or have more CIDs...
+            self._pns_rx[qp.packet_type].note_received(qp.packet_number)
+            if qp.packet_type == QuicPacketType.INITIAL:
+                assert len(qp.payload) > 0
+                assert self.peer_cid.sequence_number is None, "not first INITIAL packet received"
+                init_pkt = cast(LongHeaderPacket, qp)
+                self.peer_cid = QuicConnectionId(init_pkt.source_cid, 0, was_sent=True)
+            # now handle each frame (if present):
+            for qf in qp.payload:
+                pass
+                # TODO: when handling STREAM or DATAGRAM frames: forward their data payload to user of connection:
+                # await connection._q.s.send(stream_payload)
 
 
     async def send_all(self, data: bytes | bytearray | memoryview) -> None:
