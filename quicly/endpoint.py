@@ -4,7 +4,8 @@
 import math
 from contextlib import contextmanager, suppress, asynccontextmanager
 import errno
-import logging
+from pathlib import Path
+
 import trio
 from types import TracebackType
 from typing import *
@@ -13,11 +14,10 @@ import warnings
 from .configuration import QuicConfiguration
 from .connection import SimpleQuicConnection, ConnectionState, get_dcid_from_header
 from .exceptions import QuicProtocolError
+from .logger import QlogMemoryCollector, init_logging, make_qlog
 from .packet import MAX_UDP_PACKET_SIZE, decode_udp_packet
 from .utils import _Queue, AddressFormat, PosArgsT
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
-
-logger = logging.getLogger("quicly")
 
 @contextmanager
 def _translate_socket_errors_to_stream_errors() -> Generator[None, None, None]:
@@ -88,6 +88,16 @@ class QuicEndpoint:
 
         self._closed = False
         self._loops_spawned = False
+
+        self._qlog, self._mem_qlog = init_logging()
+        # NOTE:  1.3. Events not belonging to a single connection
+        #
+        # A single qlog event trace is typically associated with a single QUIC connection. However, for several types
+        # of events (for example, a Section 5.7 event with trigger value of connection_unknown), it can be impossible
+        # to tie them to a specific QUIC connection, especially on the server. There are various ways to handle these
+        # events, each making certain tradeoffs between file size overhead, flexibility, ease of use, or ease of
+        # implementation. Log them in a separate endpoint-wide trace (or use a special group_id value) not associated
+        # with a single connection.
 
     def start_endpoint(self, nursery: trio.Nursery) -> None:
         if not self._loops_spawned:
@@ -206,109 +216,17 @@ class QuicEndpoint:
             await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
             await destination.on_rx(list(decode_udp_packet(udp_payload)), remote_address)
-            # try:
-            #     await destination.q.s.send(udp_payload)
-            # except (trio.EndOfChannel, trio.BrokenResourceError):
-            #     # TODO: logging of this event?
-            #     del self._connections[destination_cid]
 
-    # async def _send_to(self, data: bytes | bytearray | memoryview, remote_address: AddressFormat) -> None:
-    #     # modeled after `trio.SocketStream.send_all()` implementation
-    #     async with self._send_lock:
-    #         with _translate_socket_errors_to_stream_errors():
-    #             with memoryview(data) as data:
-    #                 if not data:
-    #                     if self.socket.fileno() == -1:
-    #                         raise trio.ClosedResourceError("socket was already closed")
-    #                     await trio.lowlevel.checkpoint()
-    #                     return
-    #                 total_sent = 0
-    #                 while total_sent < len(data):
-    #                     with data[total_sent:] as remaining:
-    #                         sent = await self.socket.sendto(remaining, remote_address)
-    #                     total_sent += sent
-    #
-    # async def _wait_socket_writable(self) -> None:
-    #     async with self._send_lock:
-    #         if self.socket.fileno() == -1:
-    #             raise trio.ClosedResourceError
-    #         with _translate_socket_errors_to_stream_errors():
-    #             await self.socket.wait_writable()
+    def dump_qlog(self):
+        if isinstance(self._mem_qlog, QlogMemoryCollector):
+            # TODO: make these persist as files...
+            current_qlog = self._mem_qlog.get_qlogs()
+            self._qlog.info("Closing endpoint; here is a dump of the QLOGs in memory:\n" +
+                            "\n".join(f'odcid = {trace} : [\n  {",\n  ".join(str(e) for e in events)}\n]'
+                                      for trace, events in current_qlog.items()) + "\n")
+            # written = self._mem_qlog.dump_ndjson_per_trace(Path.cwd(), "server_{odcid}.qlog")
+            # self._qlog.info(f"Written {len(written)} files", written=written)
 
-# async def quic_send_loop(
-#         endpoint_ref: weakref.ReferenceType[QuicEndpoint],
-#         udp_socket: trio.socket.SocketType,
-# ) -> None:
-#     try:
-#         endpoint = endpoint_ref()
-#         try:
-#             if endpoint is None:
-#                 return
-#             async with endpoint.send_q.r:
-#                 async for (udp_payload, remote_address) in endpoint.send_q.r:
-#                     # modeled after `trio.SocketStream.send_all()` implementation
-#                     with _translate_socket_errors_to_stream_errors():
-#                         with memoryview(udp_payload) as data:
-#                             if not data:
-#                                 if udp_socket.fileno() == -1:
-#                                     raise trio.ClosedResourceError("socket was already closed")
-#                                 await trio.lowlevel.checkpoint()
-#                                 continue
-#                             total_sent = 0
-#                             while total_sent < len(data):
-#                                 with data[total_sent:] as remaining:
-#                                     sent = await udp_socket.sendto(remaining, remote_address)
-#                                 total_sent += sent
-#         finally:
-#             del endpoint
-#     except trio.ClosedResourceError:
-#         # socket was closed
-#         return
-#     except OSError as exc:
-#         if exc.errno in (errno.EBADF, errno.ENOTSOCK):
-#             # socket was closed
-#             return
-#         else:  # pragma: no cover
-#             # ??? shouldn't happen
-#             raise
-#
-# async def quic_receive_loop(
-#     endpoint_ref: weakref.ReferenceType[QuicEndpoint],
-#     udp_socket: trio.socket.SocketType,
-# ) -> None:
-#     try:
-#         while True:
-#             try:
-#                 udp_packet, address = await udp_socket.recvfrom(MAX_UDP_PACKET_SIZE)
-#                 print(f"\nrecvfrom: {udp_packet!r} from {address}")
-#             except OSError as exc:
-#                 if exc.errno == errno.ECONNRESET:
-#                     # Windows only: "On a UDP-datagram socket [ECONNRESET]
-#                     # indicates a previous send operation resulted in an ICMP Port
-#                     # Unreachable message" -- https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-recvfrom
-#                     #
-#                     # This is totally useless -- there's nothing we can do with this
-#                     # information. So we just ignore it and retry the recv.
-#                     continue
-#                 else:
-#                     raise
-#             endpoint = endpoint_ref()
-#             try:
-#                 if endpoint is None:
-#                     return
-#                 await endpoint.datagram_received(udp_packet, address)
-#             finally:
-#                 del endpoint
-#     except trio.ClosedResourceError:
-#         # socket was closed
-#         return
-#     except OSError as exc:
-#         if exc.errno in (errno.EBADF, errno.ENOTSOCK):
-#             # socket was closed
-#             return
-#         else:  # pragma: no cover
-#             # ??? shouldn't happen
-#             raise exc
 
 @final
 class QuicServer(QuicEndpoint):
@@ -320,9 +238,7 @@ class QuicServer(QuicEndpoint):
         except OSError:
             raise RuntimeError("UDP socket must be operational bound before it can serve") from None
         self.address = address
-
-        # self._listening_context: SSL.Context | None = None
-        # self._listening_key: bytes | None = None
+        self._qlog = make_qlog("server", "connectivity")
 
     async def serve(
         self,
@@ -390,10 +306,14 @@ class QuicServer(QuicEndpoint):
                     else:
                         await connection.on_rx(list(decode_udp_packet(payload)), remote_address)
         finally:
-            pass  # TODO: any other cleanup duties here?
+            self.dump_qlog()
 
 @final
 class QuicClient(QuicEndpoint):
+
+    def __init__(self, bound_socket: trio.socket.SocketType) -> None:
+        QuicEndpoint.__init__(self, bound_socket)
+        self._qlog = make_qlog("client", "connectivity")
 
     @asynccontextmanager
     async def connect(
@@ -442,6 +362,7 @@ class QuicClient(QuicEndpoint):
 
         async with trio.open_nursery() as nursery:
             self.start_endpoint(nursery)
+            self._qlog.info(f"Trying to connect to {target_address}")
 
             connection = SimpleQuicConnection(self._send_q.s.clone(),
                                               target_address,
@@ -457,6 +378,7 @@ class QuicClient(QuicEndpoint):
                     await connection.on_tx(initial_pkt, initial_retransmit_timeout)  # this arms initial PTO timer
                     (payload, remote_address, destination_cid) = await self._new_connections_q.r.receive()
                     if await connection.do_handshake(payload, remote_address):
+                        self._qlog.info(f"Connected to {remote_address}")
                         assert connection.peer_cid.cid == destination_cid
                         self._connections[destination_cid] = connection
                         break
@@ -472,4 +394,4 @@ class QuicClient(QuicEndpoint):
                 # on context exit: cancel everything cleanly
                 nursery.cancel_scope.cancel()
                 await connection.aclose()
-
+                self.dump_qlog()

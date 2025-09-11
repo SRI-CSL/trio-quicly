@@ -9,15 +9,16 @@ import trio
 from types import TracebackType
 from typing import *
 
-from .acks import PacketNumberTracker, SentPacket, RttState, ack_to_intervals, iter_ack_frames
+from .acks import PacketNumberTracker, SentPacket, RttState
 from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE, PARAM_SCHEMA
 from .exceptions import QuicErrorCode
 from .frame import decode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter, \
-    ConnectionCloseFrame, ACKFrame, ECNCounts, NON_ACK_ELICITING_FRAME_TYPES
+    ConnectionCloseFrame
+from .logger import make_qlog
 from .packet import create_quic_packet, is_long_header, QuicPacketType, LongHeaderPacket, \
     MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicProtocolVersion, QuicPacket
 from .trio_timer import TrioTimer
-from .utils import _Queue, AddressFormat
+from .utils import _Queue, AddressFormat, hexdump
 
 NetworkAddress = Any
 
@@ -164,6 +165,8 @@ class SimpleQuicConnection(trio.abc.Stream):
 
         self._q = _Queue[bytes](incoming_packets_buffer)
         self._loops_spawned = False
+        self._qlog = make_qlog("client" if self._is_client else "server", category="transport").bind(
+            odcid_hex=hexdump(self.host_cid))
 
     @property
     def configuration(self) -> QuicConfiguration:
@@ -359,6 +362,10 @@ class SimpleQuicConnection(trio.abc.Stream):
             pto_timer = self.pto_timers[qpkt.packet_type]
             assert timeout > 0  # TODO: log error
             pto_timer.set_timer_after(timeout)
+        self._qlog.info("Packet sent", data={"header": {"packet_type": qpkt.packet_type,
+                                                        "packet_number": qpkt.packet_number,
+                                                        # TODO: use convenience methods from qlog.py
+                                                        }})
         # submit to endpoint for sending as bytes payload:
         if qpkt.packet_type == QuicPacketType.INITIAL and self._is_client:
             # Any datagram sent by the client that contains an Initial packet must be padded to a length of
