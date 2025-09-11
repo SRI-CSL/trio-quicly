@@ -40,8 +40,8 @@ class QuicPacketType(IntEnum):
 
     def __str__(self):
         return {
-            QuicPacketType.INITIAL: "Initial Packet",
-            QuicPacketType.ONE_RTT: "1-RTT Packet",
+            QuicPacketType.INITIAL: "initial",
+            QuicPacketType.ONE_RTT: "1RTT",
         }[self]
 
 @dataclass

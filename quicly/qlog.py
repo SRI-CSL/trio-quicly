@@ -50,6 +50,7 @@ class QlogName(QlogItem):
     PACKET_LOST             = "packet_lost"
     ACK_SENT                = "ack_sent"
     ACK_RECEIVED            = "ack_received"
+    DATAGRAM_RECEIVED       = "datagram_received"
     PARAMETERS_SET          = "parameters_set"
     STATE_UPDATED           = "state_updated"            # connectivity:state_updated
     PATH_INITIALIZED        = "path_initialized"

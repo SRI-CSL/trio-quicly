@@ -1,16 +1,21 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+from functools import partial
 
 import trio
 from typing import *
 
+from .logger import init_logging
+
+
 class TrioTimer:
 
-    def __init__(self, callback_fn: Callable[[], None] | None = None) -> None:
-        self._callback_fn = callback_fn
+    def __init__(self, callback_fn: Callable[..., None] | None = None, *cb_args: Any, **cb_kwargs: Any) -> None:
+        self._callback = None if callback_fn is None else partial(callback_fn, *cb_args, **cb_kwargs)
         self._deadline: None | float = None
         self._timer_armed = trio.Event()
+        self._qlog, _ = init_logging()
 
     async def timer_loop(self) -> None:
         while True:
@@ -23,14 +28,18 @@ class TrioTimer:
                 self._timer_armed = trio.Event()
             if cancel_scope.cancelled_caught:  # timer went off
                 self._deadline = None
-                if self._callback_fn is not None:
-                    self._callback_fn()  # not async since it must not be interrupted by setting this Timer anew
+                if self._callback is not None:
+                    self._callback() # not async since it must not be interrupted by setting this Timer anew
             else:
                 pass
 
     def set_timer_at(self, deadline: float | None) -> None:
         self._deadline = None if deadline is None else deadline
         self._timer_armed.set()
+        if self._deadline is None:
+            self._qlog.debug(f'Timer disarmed at {trio.current_time():.3f}')
+        else:
+            self._qlog.debug(f'Timer armed at {trio.current_time():.3f}', deadline=f'{deadline:.3f}')
 
     def set_timer_after(self, delay: float | None) -> None:
         self.set_timer_at(None if delay is None else trio.current_time() + delay)

@@ -138,9 +138,9 @@ class SimpleQuicConnection(trio.abc.Stream):
             QuicPacketType.ONE_RTT: {},
         }
         self.bytes_in_flight: int = 0
-        self.pto_timers = {  # TODO: callback functions!
-            QuicPacketType.INITIAL: TrioTimer(),
-            QuicPacketType.ONE_RTT: TrioTimer(),
+        self.pto_timers = {
+            QuicPacketType.INITIAL: TrioTimer(self.send_probe, QuicPacketType.INITIAL),
+            QuicPacketType.ONE_RTT: TrioTimer(self.send_probe, QuicPacketType.ONE_RTT),
         }
         # self.pto_tasks = {space: None}
         # self.pto_count = {
@@ -362,7 +362,7 @@ class SimpleQuicConnection(trio.abc.Stream):
             pto_timer = self.pto_timers[qpkt.packet_type]
             assert timeout > 0  # TODO: log error
             pto_timer.set_timer_after(timeout)
-        self._qlog.info("Packet sent", data={"header": {"packet_type": qpkt.packet_type,
+        self._qlog.info("Packet sent", data={"header": {"packet_type": str(qpkt.packet_type),
                                                         "packet_number": qpkt.packet_number,
                                                         # TODO: use convenience methods from qlog.py
                                                         }})
@@ -372,6 +372,9 @@ class SimpleQuicConnection(trio.abc.Stream):
             # INITIAL_PADDING_TARGET bytes. This library does it by appending nul bytes to the datagram.
             data = data.ljust(self.configuration.transport_parameters.initial_padding_target, b'\x00')
         await self.send_all(data)
+
+    def send_probe(self, space: QuicPacketType) -> None:
+        self._qlog.info(f"Sending probe at {trio.current_time():.3f} for...", space=str(space))
 
     async def do_handshake(self, hello_payload: bytes, remote_address: NetworkAddress,
                            data_payload: bytes = None) -> bool:
@@ -489,6 +492,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         Parse UDP payload into QUIC packets and frames to be handled.  Payload of any STREAM or DATAGRAM frames then
         gets forwarded to self.q.s.send(payload) for users of this QUIC connection to receive data.
         """
+        self._qlog.info(f"Datagram received from {remote_addr}")
         # TODO: check network path with `remote_addr`?
 
         for qp in quic_packets:
@@ -496,15 +500,20 @@ class SimpleQuicConnection(trio.abc.Stream):
             if not (qp.packet_type == QuicPacketType.INITIAL and not self._is_client):
                 # INITIAL at server has not established CID:
                 assert qp.destination_cid == self.host_cid  # TODO: once we migrate or have more CIDs...
+
             self._pns_rx[qp.packet_type].note_received(qp.packet_number)
+
             if qp.packet_type == QuicPacketType.INITIAL:
                 assert len(qp.payload) > 0
-                assert self.peer_cid.sequence_number is None, "not first INITIAL packet received"
+                assert self.peer_cid.sequence_number is None, "this is not first INITIAL packet received"
                 init_pkt = cast(LongHeaderPacket, qp)
                 self.peer_cid = QuicConnectionId(init_pkt.source_cid, 0, was_sent=True)
+
             # now handle each frame (if present):
             for qf in qp.payload:
-                pass
+                if qf.frame_type in [QuicFrameType.ACK, QuicFrameType.ACK_ECN]:
+
+                    pass
                 # TODO: when handling STREAM or DATAGRAM frames: forward their data payload to user of connection:
                 # await connection._q.s.send(stream_payload)
 

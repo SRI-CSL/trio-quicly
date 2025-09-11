@@ -44,14 +44,10 @@ config_dict = {
     },
     'handlers': {
         'structlog-console': {
-            'level': 'INFO',
+            'level': 'DEBUG',  # TODO: make this configurable
             'formatter': 'quicly-formatter',
             'class': 'logging.StreamHandler',
             'stream': 'ext://sys.stdout',  # Default is stderr
-        },
-        'nullhandler': {
-            'level': 'DEBUG',
-            'class': 'logging.NullHandler',
         },
     },
     'loggers': {
@@ -124,7 +120,7 @@ class QlogMemoryCollector:
             written.append(file_path)
         return written
 
-def init_logging(level: int = logging.INFO) -> tuple[Any, None] | tuple[Any, QlogMemoryCollector]:
+def init_logging() -> tuple[Any, None] | tuple[Any, QlogMemoryCollector]:
     global _logger, _collector
     if _logger is not None:
         return _logger, _collector
@@ -139,10 +135,10 @@ def init_logging(level: int = logging.INFO) -> tuple[Any, None] | tuple[Any, Qlo
     _collector = QlogMemoryCollector(trace_key="odcid_hex")
     structlog.configure(
         processors=[
-            structlog.stdlib.filter_by_level,
             structlog.stdlib.add_log_level,
             add_qlog_time,                               # adds "time" (ms since start)
-            _collector,                                   # collect all logged events in memory for QLOG file(s)
+            _collector,                                  # collect all logged events in memory for QLOG file(s)
+            structlog.stdlib.filter_by_level,            # filter here for other processors
             structlog.processors.StackInfoRenderer(),    # Include the stack when stack_info=True
             structlog.processors.format_exc_info,        # Include the exception when exc_info=True
             structlog.processors.UnicodeDecoder(),       # Decodes the unicode values in any kv pairs
@@ -152,7 +148,7 @@ def init_logging(level: int = logging.INFO) -> tuple[Any, None] | tuple[Any, Qlo
         ],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.make_filtering_bound_logger(level),
+        wrapper_class=structlog.stdlib.BoundLogger,  # <-- NO make_filtering_bound_logger to let events pass through
         cache_logger_on_first_use=True,
     )
 

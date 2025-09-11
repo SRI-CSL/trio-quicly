@@ -1,6 +1,7 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+import logging
 import math
 from contextlib import contextmanager, suppress, asynccontextmanager
 import errno
@@ -137,7 +138,7 @@ class QuicEndpoint:
             while True:
                 try:
                     udp_packet, address = await self.socket.recvfrom(MAX_UDP_PACKET_SIZE)
-                    print(f"\nrecvfrom: {udp_packet!r} from {address}")
+                    self._qlog.debug(f"recvfrom: {len(udp_packet)} bytes from {address}")
                 except OSError as exc:
                     if exc.errno == errno.ECONNRESET:
                         # Windows only: "On a UDP-datagram socket [ECONNRESET]
