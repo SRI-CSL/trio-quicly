@@ -7,15 +7,6 @@ from typing import *
 
 from .frame import QuicFrameType, ACKFrame, ACKRange, QuicFrame, FrameSubtype
 
-# from RFC9000:
-# In order to assist loss detection at the sender, an endpoint SHOULD generate and send an ACK frame without delay when
-# it receives an ack-eliciting packet either:
-#  * when the received packet has a packet number less than another ack-eliciting packet that has been received, or
-#  * when the packet has a packet number larger than the highest-numbered ack-eliciting packet that has been received
-#    and there are missing packets between that packet and this packet.
-# Similarly, packets marked with the ECN Congestion Experienced (CE) codepoint in the IP header SHOULD be acknowledged
-# immediately, to reduce the peer's response time to congestion events.
-
 Interval = Tuple[int, int]  # [low, high], inclusive
 
 def iter_ack_frames(frames: Iterable[object]) -> Iterator[ACKFrame]:
@@ -57,22 +48,7 @@ def ack_to_intervals(ack: FrameSubtype) -> List[Interval]:
     return out
 
 @dataclass
-class SentPacket:
-    pn: int
-    time_sent: float
-    ack_eliciting: bool
-    in_flight: bool
-    # frames: list[QuicFrame]  # whatever you need to retransmit if lost
-
-# RTT (very small struct; expand as needed)
-@dataclass
-class RttState:
-    latest: Optional[float] = None
-    srtt:   Optional[float] = None
-    rttvar: Optional[float] = None
-
-@dataclass
-class PacketNumberTracker:
+class PacketNumberSpace:
     # Keep intervals sorted by LOW ascending (best for merging),
     # disjoint and non-adjacent (we merge adjacency)
     _intervals: List[Interval] = field(default_factory=list)
@@ -105,8 +81,8 @@ class PacketNumberTracker:
     def to_ack_frame(self, frame_type: QuicFrameType, ack_delay_us: int, max_ranges: int | None = None) -> QuicFrame:
         """
         Build an QuicFrame representing the current intervals.
-        - ack_delay_us: already scaled delay in microseconds (your code likely multiplies
-          by 2^ack_delay_exponent when encoding; keep that consistent with your ACKFrame).
+        - frame_type: ACK or ACK_ECN
+        - ack_delay_us: already scaled delay in microseconds (likely multiplies by 2^ack_delay_exponent when encoding).
         - max_ranges: if set, cap how many ranges we advertise (descending from largest).
         """
         if not self._intervals:

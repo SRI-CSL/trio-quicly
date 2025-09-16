@@ -1,10 +1,10 @@
 
 # Flexible imports: support flat or packaged layouts
 try:
-    from acks import PacketNumberTracker, ack_to_intervals
+    from acks import PacketNumberSpace, ack_to_intervals
     from frame import ACKFrame, QuicFrame, ACKRange, QuicFrameType, ECNCounts
 except Exception:
-    from quicly.acks import PacketNumberTracker, ack_to_intervals  # type: ignore
+    from quicly.acks import PacketNumberSpace, ack_to_intervals  # type: ignore
     from quicly.frame import ACKFrame, QuicFrame, ACKRange, QuicFrameType, ECNCounts  # type: ignore
 
 def _intervals_from_set(pns: set[int]):
@@ -27,7 +27,7 @@ def test_ack_roundtrip_encode_decode_simple():
     sent = {1,2,3, 10,11, 20}
     expect = _intervals_from_set(sent)
 
-    tr = PacketNumberTracker()
+    tr = PacketNumberSpace()
     for pn in sent:
         tr.note_received(pn)
 

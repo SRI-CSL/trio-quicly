@@ -321,7 +321,7 @@ class QuicClient(QuicEndpoint):
         self,
         target_address: AddressFormat,  # could be 2-tuple (IPv4) or 4-tuple (IPv6)
         client_configuration: QuicConfiguration | None = None,
-        connection_established_timeout: float = math.inf,  # TODO: establish default of 5-10s?
+        connection_established_timeout: float = 30.0,  # TODO: establish default of 5-10s?
         initial_retransmit_timeout: float = 1.0,
     ) -> AsyncGenerator[SimpleQuicConnection, Any]:
         """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
@@ -342,6 +342,7 @@ class QuicClient(QuicEndpoint):
             "::" only for servers that bind to them to all interfaces on localhost.
           client_configuration: The client configuration to use (or None for default values)
           connection_established_timeout: how many seconds before giving up on initial connection establishment.
+
           initial_retransmit_timeout: Since UDP is an unreliable protocol, it's
             possible that some of the packets we send during the handshake will get
             lost. To handle this, QUIC-LY uses a timer to automatically retransmit
@@ -373,19 +374,17 @@ class QuicClient(QuicEndpoint):
             connection.start_background(nursery)
 
             with trio.move_on_after(connection_established_timeout) as cancel_scope:
+                initial_pkt = connection.init_handshake()
+                await connection.on_tx(initial_pkt)  # this arms initial PTO timer
                 connection.state = ConnectionState.WAIT_FIRST
                 while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
-                    initial_pkt = connection.init_handshake()
-                    await connection.on_tx(initial_pkt, initial_retransmit_timeout)  # this arms initial PTO timer
                     (payload, remote_address, destination_cid) = await self._new_connections_q.r.receive()
                     if await connection.do_handshake(payload, remote_address):
                         self._qlog.info(f"Connected to {remote_address}")
                         assert connection.peer_cid.cid == destination_cid
                         self._connections[destination_cid] = connection
                         break
-                    # handshake unsuccessful:
-                    # PTO timer will handle re-transmit, but we need to back-off with the PTO timer
-                    initial_retransmit_timeout = 2*initial_retransmit_timeout
+                    # handshake unsuccessful: PTO timer will handle re-transmit
             if connection.is_closed or cancel_scope.cancelled_caught:
                 raise QuicProtocolError("Could not establish QUIC connection")
 

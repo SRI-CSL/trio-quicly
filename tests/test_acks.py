@@ -34,7 +34,7 @@ def test_iter_ack_frames_filters_correctly():
     a = make_ack(9, 0, [])
     qf_ack = QuicFrame(QuicFrameType.ACK, a)
     qf_ack_ecn = QuicFrame(QuicFrameType.ACK_ECN, make_ack(5, 0, []))
-    qf_pad = QuicFrame(QuicFrameType.PADDING, None)
+    qf_pad = QuicFrame(QuicFrameType.PADDING)
 
     got = list(iter_ack_frames([qf_pad, qf_ack, qf_ack_ecn]))
     assert len(got) == 2

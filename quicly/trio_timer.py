@@ -8,6 +8,22 @@ from typing import *
 
 from .logger import init_logging
 
+# Note from FRC 9002 (Section 6.2.1):
+
+# When a PTO timer expires, the PTO backoff MUST be increased, resulting in the PTO period being set to twice its
+# current value. The PTO backoff factor is reset when an acknowledgment is received, except in the following case. A
+# server might take longer to respond to packets during the handshake than otherwise. To protect such a server from
+# repeated client probes, the PTO backoff is not reset at a client that is not yet certain that the server has
+# finished validating the client's address. That is, a client does not reset the PTO backoff factor on receiving
+# acknowledgments in Initial packets.
+#
+# This exponential reduction in the sender's rate is important because consecutive PTOs might be caused by loss of
+# packets or acknowledgments due to severe congestion. Even when there are ack-eliciting packets in flight in
+# multiple packet number spaces, the exponential increase in PTO occurs across all spaces to prevent excess load on
+# the network. For example, a timeout in the Initial packet number space doubles the length of the timeout in the
+# Handshake packet number space.
+#
+# The total length of time over which consecutive PTOs expire is limited by the idle timeout.
 
 class TrioTimer:
 
@@ -35,7 +51,7 @@ class TrioTimer:
 
     def set_timer_at(self, deadline: float | None) -> None:
         self._deadline = None if deadline is None else deadline
-        self._timer_armed.set()
+        self._timer_armed.set()  # triggers timer loop to advance from `wait()`
         if self._deadline is None:
             self._qlog.debug(f'Timer disarmed at {trio.current_time():.3f}')
         else:

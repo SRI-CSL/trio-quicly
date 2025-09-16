@@ -60,7 +60,7 @@ class QuicPacket:
     packet_number: Optional[int] = field(default=None, init=False)  # The packet number (1..4 Bytes).
     # Only present in `INITIAL` and `ONE_RTT` packets.
 
-    payload: Optional[bytes] = field(default=None, init=False)  # The packet payload (1.. Bytes).
+    payload: Optional[List[QuicFrame]] = field(default=None, init=False)  # The packet payload (1.. Bytes).
     # Only present in `INITIAL` and `ONE_RTT` packets.
 
     reserved_bits: int = field(default=0, init=False)  # 2 bits = values 0..3.
@@ -89,7 +89,7 @@ class QuicPacket:
 
     def is_ack_eliciting(self) -> bool:
         # Packets that contain at least one ack-eliciting frame are called ack-eliciting packets.
-        return any(getattr(f, "frame_type", f) not in NON_ACK_ELICITING_FRAME_TYPES for f in self.payload)
+        return any(f.frame_type not in NON_ACK_ELICITING_FRAME_TYPES for f in self.payload)
 
 @dataclass
 class LongHeaderPacket(QuicPacket):
@@ -269,7 +269,7 @@ def decode_quic_packet(byte_stream: bytes, destination_cid: bytes = None) -> tup
 
 def decode_udp_packet(payload: bytes, destination_cid: bytes = None):
     """
-    Generator that yields each QUIC packet in a UDP datagram.
+    Generator that yields each QUIC packet contained in a UDP datagram.
     :param payload: bytes to be decoded into 1 or multiple QUIC packets
     :param destination_cid: optional destination connection ID, which is required for decoding 1-RTT QUIC packets
     """
