@@ -257,38 +257,60 @@ QUIC-LY uses NEW_CONNECTION_ID and RETIRE_CONNECTION_ID as in {{RFC9000}}. PATH_
 
 QUIC-LY uses connection- and stream-level flow control as in {{RFC9000}} with limits established by CONFIG/CONFIG-ACK or defaults. Limits MAY be raised during the connection using MAX_DATA and MAX_STREAM_DATA.
 
-# Loss Detection and Recovery
+# Loss Detection and Recovery {#recovery}
 
 QUIC-LY adopts the algorithms and timers of {{RFC9002}}. ACK generation, ACK delay, and probe timeouts follow QUIC norms, minus cryptographic key phases. 
 
 One notable difference to QUIC is the absence of packet number spaces. As no packet protection exists in QUIC-LY and all packets and frames are transmitted in cleartext, we allow the ACK Frame to acknowledge receiving the server's Initial packet to be carried in a 1-RTT packet from the client to the server. This is different from {{RFC9000}}, which states that "ACK frames MUST only be carried in a packet that has the same packet number space as the packet being acknowledged."
 
-# Handshake Timers and Timeouts {#handshake-timers}
+# Timers and Timeouts {#timers}
 
-This section defines QUIC-LY’s handshake reliability and timeout behavior. It is aligned with QUIC’s
+This section defines QUIC-LY’s reliability and timeout behavior. It is aligned with QUIC’s
 loss-detection timers {{RFC9002}} and the idle timeout and closing/draining semantics in {{RFC9000}},
 adapted to QUIC-LY’s TLS-free setup.
 
 ## Probe Timeout (PTO) 
 
+PTO is computed as in {{RFC9002}}:
+
+~~~
+PTO_base = SRTT + max(4 * RTTVAR, kGranularity) + max_ack_delay
+~~~
+
+with a small `kGranularity` (e.g., 1–10 ms) and `max_ack_delay` taken from the peer’s transport parameters (or 0 ms 
+during Handshake).
+
 ### PTO for Initial Packets
 
-Endpoints maintain a Probe Timeout (PTO) for the Initial packets. Before any RTT
-sample is available, endpoints MUST use:
+Endpoints maintain a Probe Timeout (PTO) for the Initial packets. Before any RTT sample is available, 
+endpoints MUST use:
 
 * `initial_rtt = 333 ms` (as in QUIC),
 * `max_ack_delay = 0 ms` for the Initial packets (to avoid handshake deadlock).
 
-PTO is computed as in {{RFC9002}}:
-
-~~~
-PTO = SRTT + max(4 * RTTVAR, kGranularity) + max_ack_delay
-~~~
-
-with a small `kGranularity` (e.g., 1–10 ms). Initial packets elicit `max_ack_delay = 0`.
-
 A PTO MUST be armed whenever there are ack-eliciting Initial packets in flight and no ACK has
 yet been received that newly acknowledges at least one of them.
+
+### PTO in ESTABLISHED (for 1-RTT Packets)
+
+QUIC-LY uses a single packet number space (see {{recovery}}) across the handshake and established phases. 
+After ESTABLISHED, endpoints maintain one PTO for Short Header operation.
+
+When to arm: Arm or keep armed whenever at least one ack-eliciting packet is in flight. If the in-flight set 
+transitions from empty to non-empty, arm to `now + PTO_base * 2^pto_count`.
+
+When to cancel: Cancel when no ack-eliciting packets remain in flight, or when entering CLOSING or DRAINING.
+
+When to re-arm on ACK: If an ACK newly acknowledges any ack-eliciting packet, update RTT using the ACK’s delay 
+(scaled by ack_delay_exponent), set `pto_count = 0`. Then, if ack-eliciting packets remain in flight, re-arm to 
+`now + PTO_base`, or cancel the PTO otherwise.
+
+If the ACK is a duplicate (no newly acknowledged packets), leave the PTO unchanged.
+
+On expiry: Send an ack-eliciting probe immediately in Short Header. Prefer new STREAM data; otherwise send PING 
+(MAY add PADDING). Count probes as in-flight. Do not declare loss solely due to PTO firing. Increase backoff 
+(`pto_count += 1`) and re-arm to `now + PTO_base * 2^pto_count`. Endpoints MAY send two ack-eliciting packets on PTO 
+if congestion control permits.
 
 ### What to Send When PTO Fires
 

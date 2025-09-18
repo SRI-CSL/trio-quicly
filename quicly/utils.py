@@ -5,6 +5,10 @@ import binascii
 import trio
 from typing import *
 
+K_MICRO_SECOND = 0.000001
+K_MILLI_SECOND = 0.001
+K_GRANULARITY  = 0.001    # 1 ms
+
 AddressFormat: TypeAlias = tuple[str, int]
 PosArgsT = TypeVarTuple("PosArgsT")
 _T = TypeVar("_T")

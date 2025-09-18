@@ -1,45 +1,18 @@
 import math
-from dataclasses import dataclass, field
 from typing import *
 
-from .acks import Interval, PacketNumberSpace, ack_to_intervals
-from .frame import QuicFrame, ACKFrame
+from .acks import ack_to_intervals, SentPacket, PacketNumberSpace
+from .frame import ACKFrame
 #from .congestion import cubic, reno  # noqa
 #from .congestion.base import K_GRANULARITY, create_congestion_control
 from .packet import QuicPacketType
+from .utils import K_MICRO_SECOND, K_GRANULARITY
 
-# loss detection
+# loss detection TODO: move these into configuration!
 K_PACKET_THRESHOLD = 3  # RFC 9002: no smaller than 3
 K_TIME_THRESHOLD = 9 / 8
-K_MICRO_SECOND = 0.000001
-# K_SECOND = 1.0
 K_INITIAL_RTT     = 0.333    # 333 ms, per RFC 9002
-K_GRANULARITY     = 0.001    # 1 ms
 
-
-@dataclass
-class SentPacket:
-    pn: int
-    time_sent: float
-    size: int
-    ack_eliciting: bool
-    in_flight: bool
-    frames: list[QuicFrame] = field(default_factory=list)  # whatever you need to retransmit if lost?
-
-@dataclass
-class QuicPacketSpace:
-    ack_at: Optional[float] = None
-    discarded: bool = False
-    expected_packet_number: int = 0
-    largest_received_packet: int = -1
-    largest_received_time: Optional[float] = None
-
-    # sent packets and loss
-    ack_eliciting_in_flight = 0
-    ack_eliciting_bytes_in_flight = 0
-    largest_acked_packet = 0
-    loss_time: Optional[float] = None
-    sent_packets: Dict[int, SentPacket] = field(default_factory=dict)
 
 class QuicPacketRecovery:
     """
@@ -48,16 +21,15 @@ class QuicPacketRecovery:
 
     def __init__(
         self,
-        *,
         # congestion_control_algorithm: str,
         # initial_rtt: float,
         # max_datagram_size: int,
         peer_completed_address_validation: bool,
-        spaces: List[QuicPacketSpace],
+        space: PacketNumberSpace,
     ) -> None:
-        self.max_ack_delay = 0.025
+        self.max_ack_delay = 0.025  # TODO: from config...
         self.peer_completed_address_validation = peer_completed_address_validation
-        self.spaces: List[QuicPacketSpace] = spaces
+        self.space = space
 
         # loss detection
         self.pto_count = 0
@@ -84,17 +56,17 @@ class QuicPacketRecovery:
     # def congestion_window(self) -> int:
     #     return self._cc.congestion_window
 
-    def discard_space(self, space: QuicPacketSpace) -> None:
-        assert space in self.spaces
+    def discard_space(self) -> None:
+        # TODO: rename to reset_space or something...
 
         # self._cc.on_packets_expired(
         #     packets=filter(lambda x: x.in_flight, space.sent_packets.values())
         # )
-        space.sent_packets.clear()
+        self.space.sent_packets.clear()
 
-        space.ack_at = None
-        space.ack_eliciting_in_flight = 0
-        space.loss_time = None
+        self.space.ack_eliciting_in_flight = 0
+        self.space.ack_eliciting_bytes_in_flight = 0
+        self.space.loss_time = None
 
         # reset PTO count
         self.pto_count = 0
@@ -109,8 +81,7 @@ class QuicPacketRecovery:
             return loss_space.loss_time
 
         # packet timer
-        if (not self.peer_completed_address_validation
-                or sum(space.ack_eliciting_in_flight for space in self.spaces) > 0):
+        if not self.peer_completed_address_validation or self.space.ack_eliciting_in_flight > 0:
             timeout = self.get_probe_timeout() * (2 ** self.pto_count)
             return self._time_of_last_sent_ack_eliciting_packet + timeout
 
@@ -121,7 +92,7 @@ class QuicPacketRecovery:
             return 2 * self._rtt_initial
         return self._rtt_smoothed + max(4 * self._rtt_variance, K_GRANULARITY) + self.max_ack_delay
 
-    def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, space: QuicPacketSpace, now: float) -> None:
+    def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, now: float) -> None:
         """
         Update metrics as the result of an ACK being received.
         """
@@ -131,10 +102,10 @@ class QuicPacketRecovery:
 
         is_ack_eliciting = False
         largest_acked = intervals[0][1]  # first high is largest
-        if largest_acked > space.largest_acked_packet:
-            space.largest_acked_packet = largest_acked
+        if largest_acked > self.space.largest_acked_packet:
+            self.space.largest_acked_packet = largest_acked
 
-        sent_map = space.sent_packets
+        sent_map = self.space.sent_packets
         if not sent_map:  # Nothing in flight (pure duplicate/late ACK) -> ignore gracefully
             return
 
@@ -160,8 +131,8 @@ class QuicPacketRecovery:
             if sp.ack_eliciting:
                 is_ack_eliciting = True
                 if sp.in_flight:
-                    space.ack_eliciting_in_flight -= 1
-                    space.ack_eliciting_bytes_in_flight -= sp.size
+                    self.space.ack_eliciting_in_flight -= 1
+                    self.space.ack_eliciting_bytes_in_flight -= sp.size
             # TODO: self._cc.on_packet_acked(packet=packet, now=now)
             # Use the largest newly-acked, ack-eliciting packet for RTT
             if pn == largest_newly_acked and sp.ack_eliciting:
@@ -199,7 +170,7 @@ class QuicPacketRecovery:
 
         # are there any prior packets in-flight but not acknowledged and
         # (> K_PACKET_THRESHOLD or time_sent > time threshold)?
-        self._detect_loss(now=now, space=space)
+        self._detect_loss(now=now)
 
         # reset PTO count (unless in INITIAL phase at client, note: INITIAL packet at server should not contain ACKs)
         if phase != QuicPacketType.INITIAL:
@@ -208,17 +179,17 @@ class QuicPacketRecovery:
     def on_loss_detection_timeout(self, *, now: float) -> None:
         loss_space = self._get_loss_space()
         if loss_space is not None:
-            self._detect_loss(now=now, space=loss_space)
+            self._detect_loss(now=now)
         else:
             self.pto_count += 1
             self.reschedule_data(now=now)
 
-    def on_packet_sent(self, packet: SentPacket, space: QuicPacketSpace) -> None:
-        space.sent_packets[packet.pn] = packet
+    def on_packet_sent(self, packet: SentPacket) -> None:
+        self.space.sent_packets[packet.pn] = packet
 
         if packet.ack_eliciting:
-            space.ack_eliciting_in_flight += 1
-            space.ack_eliciting_bytes_in_flight += packet.size
+            self.space.ack_eliciting_in_flight += 1
+            self.space.ack_eliciting_bytes_in_flight += packet.size
         if packet.in_flight:
             if packet.ack_eliciting:
                 self._time_of_last_sent_ack_eliciting_packet = packet.time_sent
@@ -235,20 +206,19 @@ class QuicPacketRecovery:
         """
         # if there is any outstanding CRYPTO, retransmit it
         crypto_scheduled = False
-        for space in self.spaces:
-            packets = tuple(
-                filter(lambda i: i.is_crypto_packet, space.sent_packets.values())
-            )
-            if packets:
-                self._on_packets_lost(now=now, packets=packets, space=space)
-                crypto_scheduled = True
-        if crypto_scheduled and self._logger is not None:
-            self._logger.debug("Scheduled CRYPTO data for retransmission")
+        packets = tuple(
+            filter(lambda i: i.is_crypto_packet, self.space.sent_packets.values())
+        )
+        if packets:
+            self._on_packets_lost(now=now, packets=packets)
+            crypto_scheduled = True
+        # if crypto_scheduled and self._logger is not None:
+        #     self._logger.debug("Scheduled CRYPTO data for retransmission")
 
-        # ensure an ACK-elliciting packet is sent
+        # ensure an ACK-eliciting packet is sent
         self._send_probe()
 
-    def _detect_loss(self, now: float, space: QuicPacketSpace) -> None:
+    def _detect_loss(self, now: float) -> None:
         """
         Check whether any packets should be declared lost.
         """
@@ -257,32 +227,26 @@ class QuicPacketRecovery:
             if self._rtt_initialized
             else self._rtt_initial
         )
-        packet_threshold = space.largest_acked_packet - K_PACKET_THRESHOLD
+        packet_threshold = self.space.largest_acked_packet - K_PACKET_THRESHOLD
         time_threshold = now - loss_delay
 
         lost_packets = []
-        space.loss_time = None
-        for packet_number, packet in space.sent_packets.items():
-            if packet_number > space.largest_acked_packet:
+        self.space.loss_time = None
+        for packet_number, packet in self.space.sent_packets.items():
+            if packet_number > self.space.largest_acked_packet:
                 break
 
             if packet_number <= packet_threshold or packet.time_sent <= time_threshold:
                 lost_packets.append(packet)
             else:
                 packet_loss_time = packet.time_sent + loss_delay
-                if space.loss_time is None or space.loss_time > packet_loss_time:
-                    space.loss_time = packet_loss_time
+                if self.space.loss_time is None or self.space.loss_time > packet_loss_time:
+                    self.space.loss_time = packet_loss_time
 
-        self._on_packets_lost(now=now, packets=lost_packets, space=space)
+        self._on_packets_lost(now=now, packets=lost_packets)
 
-    def _get_loss_space(self) -> QuicPacketSpace | None:
-        loss_space = None
-        for space in self.spaces:
-            if space.loss_time is not None and (
-                loss_space is None or space.loss_time < loss_space.loss_time
-            ):
-                loss_space = space
-        return loss_space
+    def _get_loss_space(self) -> PacketNumberSpace | None:
+        return self.space if self.space.loss_time is not None else None
 
     def _log_metrics_updated(self, log_rtt=False) -> None:
         data: Dict[str, Any] = self._cc.get_log_data()
@@ -301,33 +265,32 @@ class QuicPacketRecovery:
             category="recovery", event="metrics_updated", data=data
         )
 
-    def _on_packets_lost(
-        self, *, now: float, packets: Iterable[SentPacket], space: QuicPacketSpace
-    ) -> None:
+    def _on_packets_lost(self, *, now: float, packets: Iterable[SentPacket]) -> None:
         lost_packets_cc = []
         for packet in packets:
-            del space.sent_packets[packet.pn]
+            del self.space.sent_packets[packet.pn]
 
             if packet.in_flight:
                 lost_packets_cc.append(packet)
 
             if packet.ack_eliciting:
-                space.ack_eliciting_in_flight -= 1
+                self.space.ack_eliciting_in_flight -= 1
+                self.space.ack_eliciting_bytes_in_flight -= packet.size
 
-            if self._quic_logger is not None:
-                self._quic_logger.log_event(
-                    category="recovery",
-                    event="packet_lost",
-                    data={
-                        "type": self._quic_logger.packet_type(packet.packet_type),
-                        "packet_number": packet.packet_number,
-                    },
-                )
-                self._log_metrics_updated()
+            # if self._quic_logger is not None:
+            #     self._quic_logger.log_event(
+            #         category="recovery",
+            #         event="packet_lost",
+            #         data={
+            #             "type": self._quic_logger.packet_type(packet.packet_type),
+            #             "packet_number": packet.packet_number,
+            #         },
+            #     )
+            #     self._log_metrics_updated()
 
             # trigger callbacks
-            for handler, args in packet.delivery_handlers:
-                handler(QuicDeliveryState.LOST, *args)
+            # for handler, args in packet.delivery_handlers:
+            #     handler(QuicDeliveryState.LOST, *args)
 
         # inform congestion controller
         if lost_packets_cc:

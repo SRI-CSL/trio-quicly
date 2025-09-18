@@ -1,6 +1,7 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+import math
 from functools import partial
 
 import trio
@@ -32,6 +33,10 @@ class TrioTimer:
         self._deadline: None | float = None
         self._timer_armed = trio.Event()
         self._qlog, _ = init_logging()
+
+    @property
+    def deadline(self) -> float:
+        return math.inf if self._deadline is None else self._deadline
 
     async def timer_loop(self) -> None:
         while True:

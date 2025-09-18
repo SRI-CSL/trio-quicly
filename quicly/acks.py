@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import *
 
 from .frame import QuicFrameType, ACKFrame, ACKRange, QuicFrame, FrameSubtype
+from .utils import K_MICRO_SECOND, K_GRANULARITY
 
 Interval = Tuple[int, int]  # [low, high], inclusive
 
@@ -48,12 +49,47 @@ def ack_to_intervals(ack: FrameSubtype) -> List[Interval]:
     return out
 
 @dataclass
+class SentPacket:
+    pn: int
+    time_sent: float
+    size: int
+    ack_eliciting: bool
+    in_flight: bool
+    frames: list[QuicFrame] = field(default_factory=list)  # whatever you need to retransmit if lost?
+
+@dataclass
 class PacketNumberSpace:
+    # prior coed: class QuicPacketSpace:
+    # ack_at: Optional[float] = None
+    expected_packet_number: int = 0
+    _largest_ack_eliciting_packet: int = -1
+    largest_received_packet_number: int = -1
+    largest_received_time: Optional[float] = None
+    # sent packets and loss
+    ack_eliciting_in_flight = 0
+    ack_eliciting_bytes_in_flight = 0
+    largest_acked_packet = 0
+    loss_time: Optional[float] = None
+    sent_packets: Dict[int, SentPacket] = field(default_factory=dict)
+
     # Keep intervals sorted by LOW ascending (best for merging),
     # disjoint and non-adjacent (we merge adjacency)
     _intervals: List[Interval] = field(default_factory=list)
 
-    def note_received(self, pn: int) -> None:
+    @property
+    def largest_ack_eliciting_pkt(self):
+        return self._largest_ack_eliciting_packet
+
+    @largest_ack_eliciting_pkt.setter
+    def largest_ack_eliciting_pkt(self, value):
+        if value > self._largest_ack_eliciting_packet:
+            self._largest_ack_eliciting_packet = value
+
+    def note_received(self, pn: int, now: float) -> None:
+        if pn > self.largest_received_packet_number:
+            self.largest_received_packet_number = pn
+            self.largest_received_time = now
+
         """Insert PN as [pn..pn], merging adjacent/overlapping intervals."""
         ivs = self._intervals
         new_lo = new_hi = pn
@@ -78,15 +114,16 @@ class PacketNumberSpace:
 
         ivs.insert(i, (new_lo, new_hi))
 
-    def to_ack_frame(self, frame_type: QuicFrameType, ack_delay_us: int, max_ranges: int | None = None) -> QuicFrame:
+    def to_ack_frame(self, frame_type: QuicFrameType, now: float, max_ranges: int | None = None) -> QuicFrame | None:
         """
         Build an QuicFrame representing the current intervals.
-        - frame_type: ACK or ACK_ECN
-        - ack_delay_us: already scaled delay in microseconds (likely multiplies by 2^ack_delay_exponent when encoding).
-        - max_ranges: if set, cap how many ranges we advertise (descending from largest).
+        :param frame_type: ACK or ACK_ECN
+        :param now: current time
+        :param max_ranges: if set, cap how many ranges we advertise (descending from largest).
+        :return: QuicFrame representing the current intervals or None, if nothing currently to ACK.
         """
         if not self._intervals:
-            raise ValueError("No PNs to ACK")
+            return None
 
         # Sort by HIGH descending for ACK encoding
         ivs = sorted(self._intervals, key=lambda r: r[1], reverse=True)
@@ -108,6 +145,7 @@ class PacketNumberSpace:
             ack_ranges.append(ACKRange(gap=gap, ack_range_length=ack_range_length))
             prev_low = low
 
+        ack_delay_us = int(max(now - self.largest_received_time, K_GRANULARITY) / K_MICRO_SECOND)
         ack = ACKFrame(
             largest_ack=largest_ack,
             ack_delay=ack_delay_us,

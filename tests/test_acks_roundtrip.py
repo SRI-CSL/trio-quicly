@@ -1,3 +1,6 @@
+import time
+
+NOW = time.time()
 
 # Flexible imports: support flat or packaged layouts
 try:
@@ -29,10 +32,10 @@ def test_ack_roundtrip_encode_decode_simple():
 
     tr = PacketNumberSpace()
     for pn in sent:
-        tr.note_received(pn)
+        tr.note_received(pn, now=NOW)
 
     # Returns a QuicFrame wrapper
-    qf = tr.to_ack_frame(QuicFrameType.ACK, ack_delay_us=1000)
+    qf = tr.to_ack_frame(QuicFrameType.ACK, now=NOW)
 
     # Full on-wire (type+payload)
     wire = qf.encode()

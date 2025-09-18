@@ -9,7 +9,7 @@ import trio
 from types import TracebackType
 from typing import *
 
-from .acks import PacketNumberSpace
+from .acks import PacketNumberSpace, SentPacket
 from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE, PARAM_SCHEMA
 from .exceptions import QuicErrorCode
 from .frame import decode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter, \
@@ -17,9 +17,9 @@ from .frame import decode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame,
 from .logger import make_qlog
 from .packet import create_quic_packet, is_long_header, QuicPacketType, LongHeaderPacket, \
     MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicProtocolVersion, QuicPacket
-from .recovery import SentPacket, QuicPacketSpace, QuicPacketRecovery
+from .recovery import QuicPacketRecovery, K_GRANULARITY
 from .trio_timer import TrioTimer
-from .utils import _Queue, AddressFormat, hexdump
+from .utils import _Queue, AddressFormat, hexdump, K_MILLI_SECOND
 
 NetworkAddress = Any
 
@@ -126,10 +126,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         # self._peer_retire_prior_to = 0
 
         # TODO: packet numbers and ACKs:
-        self._next_pn_tx = {
-            QuicPacketType.INITIAL: 0,
-            QuicPacketType.ONE_RTT: 0,
-        }
+        self._next_pn_tx = 0
         # # Optional: whether an ACK is pending in each space
         # self._ack_needed_initial = False
         # self._ack_needed_1rtt    = False
@@ -138,20 +135,14 @@ class SimpleQuicConnection(trio.abc.Stream):
             QuicPacketType.ONE_RTT: TrioTimer(self.send_probe, QuicPacketType.ONE_RTT),
         }
         # track received packet numbers by space:
-        self._pn_spaces: dict[QuicPacketType, PacketNumberSpace] = {
-            QuicPacketType.INITIAL: PacketNumberSpace(),
-            QuicPacketType.ONE_RTT: PacketNumberSpace()
-        }
+        self._pn_space = PacketNumberSpace()
+        self._ack_timer = TrioTimer(self.send_acks, 123456.123346)  # TODO: change!
         # loss recovery
-        self._spaces = {
-            QuicPacketType.INITIAL: QuicPacketSpace(),
-            QuicPacketType.ONE_RTT: QuicPacketSpace()
-        }
         self._loss = QuicPacketRecovery(
             # congestion_control_algorithm=configuration.congestion_control_algorithm,
             # max_datagram_size=self._max_datagram_size,
             peer_completed_address_validation=not self._is_client,
-            spaces=list(self._spaces.values()),
+            space=self._pn_space,
         )
         self.max_ack_delay_ms = 8  # Initial space: 8ms; 1-RTT: from transport param
 
@@ -230,9 +221,9 @@ class SimpleQuicConnection(trio.abc.Stream):
     #     # Re-arm based on new now:
     #     self._arm_pto(space, trio.current_time())
 
-    def _get_and_incr_pn(self, space: QuicPacketType) -> int:
-        next_pn = self._next_pn_tx[space]
-        self._next_pn_tx[space] = next_pn + 1
+    def _get_and_incr_pn(self) -> int:
+        next_pn = self._next_pn_tx
+        self._next_pn_tx = next_pn + 1
         return next_pn
 
     # def _update_rtt(self, space: PNSpace, latest: float, ack_delay: float) -> None:
@@ -295,11 +286,14 @@ class SimpleQuicConnection(trio.abc.Stream):
         return create_quic_packet(QuicPacketType.INITIAL,
                                   destination_cid=b'',  # don't need random bits in QUIC-LY!
                                   source_cid=self.host_cid,
-                                  packet_number=self._get_and_incr_pn(QuicPacketType.INITIAL),
+                                  packet_number=self._get_and_incr_pn(),
                                   payload=[client_config_frame])
 
     async def on_tx(self, qpkt: QuicPacket) -> None:
-        # TODO: if any ACKs need to be added, do that now...
+        possible_ack_frame = self._pn_space.to_ack_frame(QuicFrameType.ACK, now=trio.current_time())
+        if possible_ack_frame is not None:
+            qpkt.payload.append(possible_ack_frame)
+        assert len(qpkt.payload)  # by now, we should have at least one frame
         data = qpkt.encode_all_bytes()
         sp = SentPacket(
             qpkt.packet_number,
@@ -309,7 +303,7 @@ class SimpleQuicConnection(trio.abc.Stream):
             in_flight=True,
             frames=[fr for fr in qpkt.payload if fr.frame_type in NON_ACK_ELICITING_FRAME_TYPES]
         )
-        self._loss.on_packet_sent(packet=sp, space=self._spaces[qpkt.packet_type])
+        self._loss.on_packet_sent(packet=sp)
         if sp.ack_eliciting:  # if ack-eliciting: arm or re-arm PTO timer:
             pto_timer = self.pto_timers[qpkt.packet_type]
             timeout = self._loss.get_probe_timeout()
@@ -328,6 +322,7 @@ class SimpleQuicConnection(trio.abc.Stream):
 
     def send_probe(self, space: QuicPacketType) -> None:
         self._qlog.info(f"Sending probe at {trio.current_time():.3f} for...", space=str(space))
+        # TODO: signal on_tx() as that is async...
         # TODO: or will the timer be set when going through on_tx()?
         # when re-arming timer: exponentially back-off:
         self._loss.pto_count += 1
@@ -335,8 +330,15 @@ class SimpleQuicConnection(trio.abc.Stream):
         deadline = base * (2 ** self._loss.pto_count)  # exponential backoff applied here
         self._qlog.debug(f"Probe deadline = {deadline:.0f} and PTO count={self._loss.pto_count}", space=str(space))
         ldt = self._loss.get_loss_detection_time()
-        self._qlog.debug(f"LDT = {ldt:.0f}", space=str(space))
+        self._qlog.debug(f"Loss Detection Timeout = {ldt:.3f}", space=str(space))
         self.pto_timers[space].set_timer_after(deadline)
+
+    def send_acks(self, now: float) -> None:
+        # TODO: what should the advertised ack_delay be?
+        ack_frame = self._pn_space.to_ack_frame(QuicFrameType.ACK, now)
+        assert isinstance(ack_frame.content, ACKFrame)
+        self._qlog.debug(f"ACK timer triggered to send ACK frame for {ack_frame.content.ack_ranges} ACK ranges")
+        # TODO: signal on_tx() as that is async...
 
     async def do_handshake(self, hello_payload: bytes, remote_address: NetworkAddress) -> bool:
         """Perform the handshake.
@@ -394,11 +396,7 @@ class SimpleQuicConnection(trio.abc.Stream):
 
                     await self.on_rx([client_initial_pkt], remote_address)
 
-                    # ACK immediately:
-                    payload = [self._pn_spaces[QuicPacketType.INITIAL].to_ack_frame(
-                        frame_type=QuicFrameType.ACK,
-                        ack_delay_us=8,  # must be >= 8
-                    )]
+                    payload = []
                     # find last CONFIG frame in payload (ignore any prior):
                     last_cfg = next((f for f in reversed(client_initial_pkt.payload)
                                      if f.frame_type == QuicFrameType.CONFIG), None)
@@ -415,7 +413,7 @@ class SimpleQuicConnection(trio.abc.Stream):
                     server_initial_pkt = create_quic_packet(QuicPacketType.INITIAL,
                                                             destination_cid=client_initial_pkt.source_cid,  # repeated back
                                                             source_cid=self.host_cid,
-                                                            packet_number=self._get_and_incr_pn(QuicPacketType.INITIAL),
+                                                            packet_number=self._get_and_incr_pn(),
                                                             payload=payload)
                     await self.on_tx(server_initial_pkt)
 
@@ -425,7 +423,7 @@ class SimpleQuicConnection(trio.abc.Stream):
                 return False
             self.remote_address = remote_address  # potentially overwrite client's initial target address
             self.state = ConnectionState.ESTABLISHED
-            # TODO: move officially into 1RTT phase (discard space etc?)
+            # TODO: move officially into 1RTT phase...
             self._did_handshake = True
             return True
 
@@ -443,7 +441,7 @@ class SimpleQuicConnection(trio.abc.Stream):
                 # check destination CID; skip for INITIAL at server (as it has not established CID):
                 assert qp.destination_cid == self.host_cid  # TODO: once we migrate or have more CIDs...
 
-            self._pn_spaces[qp.packet_type].note_received(qp.packet_number)
+            self._pn_space.note_received(qp.packet_number, now=trio.current_time())  # add PN to space
 
             if qp.packet_type == QuicPacketType.INITIAL:
                 assert len(qp.payload) > 0
@@ -457,10 +455,10 @@ class SimpleQuicConnection(trio.abc.Stream):
             for qf in qp.payload:
                 if qf.frame_type not in NON_ACK_ELICITING_FRAME_TYPES:
                     ack_eliciting = True
+                    self._pn_space.largest_ack_eliciting_pkt = qp.packet_number
 
                 if qf.frame_type in [QuicFrameType.ACK, QuicFrameType.ACK_ECN]:
-                    self._loss.on_ack_received(cast(ACKFrame, qf.content), qp.packet_type,
-                                               self._spaces[qp.packet_type], trio.current_time())
+                    self._loss.on_ack_received(cast(ACKFrame, qf.content), qp.packet_type, trio.current_time())
                     ack_encountered = True
                     continue
 
@@ -470,12 +468,24 @@ class SimpleQuicConnection(trio.abc.Stream):
                 # await connection._q.s.send(data_payload)
             if ack_encountered:
                 self._rearm_pto(qp.packet_type)
-            next_ack = self._pn_spaces[qp.packet_type].to_ack_frame(
-                frame_type=QuicFrameType.ACK,  # TODO: or ACK_ECN (needs parsing of IP or UDP header!)
-                ack_delay_us=8,  # must be >= 8 TODO: what should this be in general?
-            )
             if ack_eliciting:
-                pass # TODO: if qp is ack-eliciting, then schedule ACKs for sending later (before max_delay)
+                max_ack_delay = self.configuration.transport_parameters.max_ack_delay_ms * K_MILLI_SECOND
+                # An endpoint SHOULD generate and send an ACK frame without delay when it receives an ack-eliciting
+                # packet either: (1) when the received packet has a packet number less than another ack-eliciting
+                # packet that has been received, or (2) when the packet has a packet number larger than the
+                # highest-numbered ack-eliciting packet that has been received and there are missing packets between
+                # that packet and this packet. Similarly, packets marked with the ECN Congestion Experienced (CE)
+                # codepoint in the IP header SHOULD be acknowledged immediately. A receiver SHOULD send an ACK frame
+                # after receiving at least two ack-eliciting packets.
+                if (
+                        qp.packet_type == QuicPacketType.INITIAL or
+                        qp.packet_number < self._pn_space.largest_ack_eliciting_pkt or
+                        self._pn_space.largest_acked_packet < qp.packet_number - 2
+                ):
+                    max_ack_delay = K_GRANULARITY  # no (real) delay for conditions above
+                ack_deadline = trio.current_time() + max_ack_delay
+                if ack_deadline < self._ack_timer.deadline:  # an unarmed timer has deadline == math.inf
+                    self._ack_timer.set_timer_at(ack_deadline)
 
     async def send_all(self, data: bytes | bytearray | memoryview) -> None:
         """
