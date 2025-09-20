@@ -5,7 +5,7 @@
 import pytest
 
 from quicly.configuration import QuicConfiguration
-from quicly.connection import SimpleQuicConnection, get_dcid_from_header
+from quicly.connection import SimpleQuicConnection, get_cid_from_header
 from quicly.frame import parse_all_quic_frames, QuicFrame, QuicFrameType, MaxDataFrame
 from quicly.packet import create_quic_packet, QuicPacketType
 
@@ -41,15 +41,15 @@ def test_get_dcid_from_packet():
 
     initial_pkt = create_quic_packet(QuicPacketType.INITIAL, sample_dcid, source_cid=sample_scid,
                                      packet_number=packet_number, payload=frames)
-    dcid = get_dcid_from_header(initial_pkt.encode_all_bytes(), len(sample_scid))
+    dcid = get_cid_from_header(initial_pkt.encode_all_bytes(), len(sample_scid))
     assert dcid == sample_scid
 
     initial_pkt = create_quic_packet(QuicPacketType.INITIAL, b'', source_cid=sample_dcid,
                                      packet_number=packet_number, payload=frames)
-    dcid = get_dcid_from_header(initial_pkt.encode_all_bytes(), len(sample_dcid))
+    dcid = get_cid_from_header(initial_pkt.encode_all_bytes(), len(sample_dcid))
     assert dcid == sample_dcid
 
-    dcid = get_dcid_from_header(bytes.fromhex("11 00 11 10 00 00 00 ff ef b0"), 3)
+    dcid = get_cid_from_header(bytes.fromhex("11 00 11 10 00 00 00 ff ef b0"), 3)
     assert dcid == None
 
     frames = [QuicFrame(frame_type=QuicFrameType.MAX_DATA, content=MaxDataFrame(max_data=42)),
@@ -57,8 +57,8 @@ def test_get_dcid_from_packet():
     one_rtt_pkt = create_quic_packet(QuicPacketType.ONE_RTT, sample_dcid,
                                      spin_bit=False, key_phase=True,
                                      packet_number=packet_number, payload=frames)
-    dcid = get_dcid_from_header(one_rtt_pkt.encode_all_bytes(), len(sample_dcid))
+    dcid = get_cid_from_header(one_rtt_pkt.encode_all_bytes(), len(sample_dcid))
     assert dcid == sample_dcid
 
-    dcid = get_dcid_from_header(bytes.fromhex("01 00 00 00 ff ef b0"), 3)
+    dcid = get_cid_from_header(bytes.fromhex("01 00 00 00 ff ef b0"), 3)
     assert dcid == None

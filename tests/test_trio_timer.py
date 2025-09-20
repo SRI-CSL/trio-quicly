@@ -1,4 +1,3 @@
-import time
 import trio
 from trio.testing import MockClock
 
@@ -16,7 +15,7 @@ def approx(a, b, tol=0.01):
 
 def cb():
     global alarm
-    assert approx(trio.current_time(), alarm)
+    assert alarm <= trio.current_time()
     alarm = 0.0  # reset
 
 async def _run_timer_with(callback, async_test):
@@ -135,5 +134,21 @@ def test_timer_can_be_reused_after_firing():
 
         await _run_timer_with(cb, scenario)
 
+    trio.run(main, clock=MockClock(autojump_threshold=0))
+
+def test_timer_fires_if_deadline_is_set_to_past():
+    async def main():
+        async def scenario(timer, nursery):
+            await trio.sleep(2)
+            global alarm
+            alarm = trio.current_time() - 1
+            timer.set_timer_at(alarm)
+            await trio.sleep(1)
+            assert alarm == 0.0  # timer fired and executed callback
+
+            # stop the timer loop so the test completes
+            nursery.cancel_scope.cancel()
+
+        await _run_timer_with(cb, scenario)
 
     trio.run(main, clock=MockClock(autojump_threshold=0))

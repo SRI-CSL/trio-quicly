@@ -55,20 +55,21 @@ class SentPacket:
     size: int
     ack_eliciting: bool
     in_flight: bool
+    is_initial: bool
     frames: list[QuicFrame] = field(default_factory=list)  # whatever you need to retransmit if lost?
 
 @dataclass
 class PacketNumberSpace:
     # prior coed: class QuicPacketSpace:
     # ack_at: Optional[float] = None
-    expected_packet_number: int = 0
+    # expected_packet_number: int = 0
     _largest_ack_eliciting_packet: int = -1
     largest_received_packet_number: int = -1
     largest_received_time: Optional[float] = None
     # sent packets and loss
     ack_eliciting_in_flight = 0
     ack_eliciting_bytes_in_flight = 0
-    largest_acked_packet = 0
+    largest_acked_packet = -1
     loss_time: Optional[float] = None
     sent_packets: Dict[int, SentPacket] = field(default_factory=dict)
 

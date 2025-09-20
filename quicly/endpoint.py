@@ -13,11 +13,11 @@ from typing import *
 import warnings
 
 from .configuration import QuicConfiguration
-from .connection import SimpleQuicConnection, ConnectionState, get_dcid_from_header
+from .connection import SimpleQuicConnection, ConnectionState, get_cid_from_header
 from .exceptions import QuicProtocolError
 from .logger import QlogMemoryCollector, init_logging, make_qlog
 from .packet import MAX_UDP_PACKET_SIZE, decode_udp_packet
-from .utils import _Queue, AddressFormat, PosArgsT
+from .utils import _Queue, AddressFormat, PosArgsT, hexdump
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
 @contextmanager
@@ -82,10 +82,8 @@ class QuicEndpoint:
         self._new_connections_q = _Queue[tuple[bytes, tuple[str, int], bytes]](float("inf"))
         self._send_q = _Queue[tuple[bytes, tuple[str, int]]](0)  # unbuffered sending Q for tuples (UDP payload, remote address)
 
-        # We don't need to track handshaking vs non-handshake connections
-        # separately. We only keep one connection per remote address.
-        # {destination CID: QUIC connection}
-        self._connections: dict[bytes, SimpleQuicConnection] = {}
+        # tracking ESTABLISHED connections:
+        self._connections: dict[bytes, SimpleQuicConnection] = {}  # {destination CID: QUIC connection}
 
         self._closed = False
         self._loops_spawned = False
@@ -208,15 +206,18 @@ class QuicEndpoint:
         # TODO: handles anti-amplification, network path validation, and initial parsing before dispatching to the
         #   correct connection
 
-        destination_cid = get_dcid_from_header(udp_payload, self.connection_id_length)
+        destination_cid = get_cid_from_header(udp_payload, self.connection_id_length)
         if destination_cid is None:
-            # drop (and log?) UDP packet as it wasn't formatted for QUIC
+            self._qlog.info(f"UDP datagram from {remote_address} does not contain CID: drop", size=len(udp_payload))
             return
         destination = self._connections.get(destination_cid, None)
         if destination is None:
+            # connection for destination not yet established:
             await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
-            await destination.on_rx(list(decode_udp_packet(udp_payload)), remote_address)
+            self._qlog.debug(f"~~~ UDP datagram from known connection CID={hexdump(destination_cid)}",
+                             size=len(udp_payload))
+            await destination.on_rx(list(decode_udp_packet(udp_payload, destination_cid)), remote_address)
 
     def dump_qlog(self):
         if isinstance(self._mem_qlog, QlogMemoryCollector):
@@ -239,7 +240,15 @@ class QuicServer(QuicEndpoint):
         except OSError:
             raise RuntimeError("UDP socket must be operational bound before it can serve") from None
         self.address = address
+        # tracking new connections until they become ESTABLISHED:
+        self._new_connections: dict[bytes, SimpleQuicConnection] = {}  # {remote source CID: QUIC connection}
         self._qlog = make_qlog("server", "connectivity")
+
+    def close(self) -> None:
+        # TODO: will this be invoked from QuicServer(Endpoint).aclose()?
+        for stream in list(self._new_connections.values()):  # if any still pending
+            stream.close()
+        super().close()
 
     async def serve(
         self,
@@ -287,25 +296,29 @@ class QuicServer(QuicEndpoint):
                 if handler_nursery is None:
                     handler_nursery = nursery
                 async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
-                    connection = self._connections.get(destination_cid, None)
+                    connection = self._new_connections.get(destination_cid, None)
                     if connection is None:
+                        self._qlog.debug(f"~~~ Starting NEW connection CID={hexdump(destination_cid)}")
                         server_config = QuicConfiguration(is_client=False)
                         connection = SimpleQuicConnection(self._send_q.s.clone(),
                                                           remote_address,
                                                           self.connection_id_length,
                                                           self.incoming_packets_buffer,
                                                           server_config)
-                        if await connection.do_handshake(payload, remote_address) and not connection.is_closed:
-                            # handshake was successful
-                            assert connection.state == ConnectionState.ESTABLISHED
-                            assert connection.peer_cid.cid == destination_cid
-                            self._connections[destination_cid] = connection
-                            handler_nursery.start_soon(handle_connection, connection)
-                        else:
-                            # couldn't find recipient connection for this payload, so silently dropping
-                            pass  # TODO: log it though?
+                        self._new_connections[destination_cid] = connection
+                        connection.start_background(nursery)
                     else:
-                        await connection.on_rx(list(decode_udp_packet(payload)), remote_address)
+                        self._qlog.debug(f"~~~ Serving existing NEW connection CID={hexdump(destination_cid)}")
+
+                    if await connection.do_handshake(payload, remote_address):
+                        assert connection.peer_cid.cid == destination_cid
+                        if connection.host_cid not in self._connections.keys():
+                            # first successful handshake: note connection for future packet delivery
+                            self._connections[connection.host_cid] = connection
+                            handler_nursery.start_soon(handle_connection, connection)
+                    else:
+                        pass  # TODO: log this?
+
         finally:
             self.dump_qlog()
 
@@ -373,18 +386,19 @@ class QuicClient(QuicEndpoint):
                                               configuration=client_configuration)
             connection.start_background(nursery)
 
+            connection_established_timeout = math.inf  # TODO: Linda: remove after testing!
             with trio.move_on_after(connection_established_timeout) as cancel_scope:
                 initial_pkt = connection.init_handshake()
-                await connection.on_tx(initial_pkt)  # this arms initial PTO timer
-                connection.state = ConnectionState.WAIT_FIRST
-                while connection.state == ConnectionState.WAIT_FIRST and not connection.is_closed:
-                    (payload, remote_address, destination_cid) = await self._new_connections_q.r.receive()
+                await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed
+                async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
                     if await connection.do_handshake(payload, remote_address):
-                        self._qlog.info(f"Connected to {remote_address}")
                         assert connection.peer_cid.cid == destination_cid
-                        self._connections[destination_cid] = connection
+                    # else: handshake unsuccessful: PTO timer will handle re-transmit of INITIAL (as probe)
+                    if connection.state == ConnectionState.ESTABLISHED:
+                        self._qlog.info(f"Connected to {remote_address}")
+                        self._connections[connection.host_cid] = connection  # clients only use 1 connection
+                        # now datagrams will be delivered directly to this connection!
                         break
-                    # handshake unsuccessful: PTO timer will handle re-transmit
             if connection.is_closed or cancel_scope.cancelled_caught:
                 raise QuicProtocolError("Could not establish QUIC connection")
 

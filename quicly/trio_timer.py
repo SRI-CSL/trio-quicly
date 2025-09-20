@@ -26,13 +26,28 @@ from .logger import init_logging
 #
 # The total length of time over which consecutive PTOs expire is limited by the idle timeout.
 
+def callable_name(cb):
+    if cb is None:
+        return "None"
+    # unwrap partials
+    while isinstance(cb, partial):
+        cb = cb.func
+    # prefer qualname (nice for bound methods/classes)
+    return getattr(cb, "__qualname__", getattr(cb, "__name__", f"{type(cb).__name__}"))
+
+
 class TrioTimer:
 
-    def __init__(self, callback_fn: Callable[..., None] | None = None, *cb_args: Any, **cb_kwargs: Any) -> None:
+    def __init__(self, vantage: str = "unkown",
+                 callback_fn: Callable[..., None] | None = None, *cb_args: Any, **cb_kwargs: Any) -> None:
         self._callback = None if callback_fn is None else partial(callback_fn, *cb_args, **cb_kwargs)
-        self._deadline: None | float = None
+        self._deadline: float | None = None
         self._timer_armed = trio.Event()
-        self._qlog, _ = init_logging()
+        qlog, _ = init_logging()
+        self._qlog = qlog.bind(vantage=vantage)
+
+    def __str__(self):
+        return f"TrioTimer for callback={callable_name(self._callback)})"
 
     @property
     def deadline(self) -> float:
@@ -50,6 +65,7 @@ class TrioTimer:
             if cancel_scope.cancelled_caught:  # timer went off
                 self._deadline = None
                 if self._callback is not None:
+                    self._qlog.debug(f'{self} fired at {trio.current_time():.3f}')
                     self._callback() # not async since it must not be interrupted by setting this Timer anew
             else:
                 pass
@@ -58,9 +74,9 @@ class TrioTimer:
         self._deadline = None if deadline is None else deadline
         self._timer_armed.set()  # triggers timer loop to advance from `wait()`
         if self._deadline is None:
-            self._qlog.debug(f'Timer disarmed at {trio.current_time():.3f}')
+            self._qlog.debug(f'{self} disarmed at {trio.current_time():.3f}')
         else:
-            self._qlog.debug(f'Timer armed at {trio.current_time():.3f}', deadline=f'{deadline:.3f}')
+            self._qlog.debug(f'{self} armed at {trio.current_time():.3f}', deadline=f'{deadline:.3f}')
 
     def set_timer_after(self, delay: float | None) -> None:
         self.set_timer_at(None if delay is None else trio.current_time() + delay)

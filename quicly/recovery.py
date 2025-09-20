@@ -92,13 +92,14 @@ class QuicPacketRecovery:
             return 2 * self._rtt_initial
         return self._rtt_smoothed + max(4 * self._rtt_variance, K_GRANULARITY) + self.max_ack_delay
 
-    def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, now: float) -> None:
+    def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, now: float) -> bool:
         """
         Update metrics as the result of an ACK being received.
+        If we saw an ACK for an INITIAL packet, return True, otherwise return False.
         """
         intervals = ack_to_intervals(ack)  # [(low, high)] descending by high
         if not intervals:
-            return
+            return False
 
         is_ack_eliciting = False
         largest_acked = intervals[0][1]  # first high is largest
@@ -107,7 +108,7 @@ class QuicPacketRecovery:
 
         sent_map = self.space.sent_packets
         if not sent_map:  # Nothing in flight (pure duplicate/late ACK) -> ignore gracefully
-            return
+            return False
 
         # Collect newly-acked PNs we actually have in-flight
         def is_acked(pn: int) -> bool:
@@ -119,13 +120,14 @@ class QuicPacketRecovery:
 
         acked_pns = sorted([pn for pn in list(sent_map.keys()) if is_acked(pn)])
         if not acked_pns:  # No new info; could be a duplicate ACK
-            return
+            return False
 
         largest_newly_acked = max(acked_pns)
         largest_sent_time = None
         rtt_sample = None
 
         # Remove from flight & maybe take RTT sample
+        newly_established = False
         for pn in acked_pns:
             sp = sent_map.pop(pn)
             if sp.ack_eliciting:
@@ -133,6 +135,9 @@ class QuicPacketRecovery:
                 if sp.in_flight:
                     self.space.ack_eliciting_in_flight -= 1
                     self.space.ack_eliciting_bytes_in_flight -= sp.size
+            if sp.is_initial:
+                # move connection into ESTABLISHED!
+                newly_established = True
             # TODO: self._cc.on_packet_acked(packet=packet, now=now)
             # Use the largest newly-acked, ack-eliciting packet for RTT
             if pn == largest_newly_acked and sp.ack_eliciting:
@@ -175,6 +180,8 @@ class QuicPacketRecovery:
         # reset PTO count (unless in INITIAL phase at client, note: INITIAL packet at server should not contain ACKs)
         if phase != QuicPacketType.INITIAL:
             self.pto_count = 0
+
+        return newly_established
 
     def on_loss_detection_timeout(self, *, now: float) -> None:
         loss_space = self._get_loss_space()

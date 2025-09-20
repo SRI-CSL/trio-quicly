@@ -2,10 +2,11 @@
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
-import math
-import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
+import math
+import secrets
+import struct
 from typing import *
 
 from .exceptions import QuicProtocolViolation
@@ -67,6 +68,7 @@ class QuicPacket:
     # Only present in `INITIAL` and `ONE_RTT` packets.
     # Must be 0 prior to protection, otherwise, endpoint receiving and having removed both packet and header
     # protection should treat this as connection error of type PROTOCOL_VIOLATION.
+    # In QUIC-LY (without protection), these MUST always be 0.
 
     def encode_first_byte(self) -> int:
         raise NotImplementedError()
@@ -115,6 +117,7 @@ class LongHeaderPacket(QuicPacket):
             | (1 << 2)                  # second bit is FIXED BIT
             | self.packet_type
         )
+        assert self.reserved_bits == 0  # in QUIC-LY only
         return first_four_bits << 4 | (self.reserved_bits << 2) | (self.packet_number_length - 1)
 
     def encode_all_bytes(self) -> bytes:
@@ -180,17 +183,22 @@ class ShortHeaderPacket(QuicPacket):
     is_long_header: bool = field(default=False, init=False)
     packet_type: QuicPacketType = field(default=QuicPacketType.ONE_RTT, init=False)
 
-    spin_bit: bool = False
-    key_phase: bool = True
+    # When the spin bit is disabled, endpoints MAY set the spin bit to any value and MUST ignore any incoming value.
+    # It is RECOMMENDED that endpoints set the spin bit to a random value either chosen independently for each packet
+    # or chosen independently for each connection ID.
+    spin_bit: bool = field(default_factory=lambda: bool(secrets.randbits(1)))
+    # Not used in QUIC-LY: ignore and set to False (0) by default:
+    key_phase: bool = False
     packet_number: int = field(init=True)
     payload: List[QuicFrame] = field(init=True, default_factory=list)
 
     def __post_init__(self):
         super().__post_init__()
-        assert self.payload is not None and len(self.payload) > 0
+        # assert self.payload is not None and len(self.payload) > 0
 
     def encode_first_byte(self) -> int:
         assert self.reserved_bits.bit_length() <= 2
+        assert self.reserved_bits == 0  # in QUIC-LY only
         assert (self.packet_number_length - 1).bit_length() <= 2
         return (
             (self.is_long_header << 7)  # first bit should be 0
@@ -246,7 +254,7 @@ def create_quic_packet(packet_type: QuicPacketType, destination_cid: bytes, **kw
     assert destination_cid is not None
 
     if packet_type == QuicPacketType.ONE_RTT:
-        required_keys = {"spin_bit", "key_phase", "packet_number", "payload"}
+        required_keys = {"packet_number", "payload"}
         if not required_keys.issubset(kwargs):
             raise ValueError(f"Missing required keyword arguments for {packet_type}: {required_keys - kwargs.keys()}")
         return ShortHeaderPacket(destination_cid=destination_cid, **kwargs)

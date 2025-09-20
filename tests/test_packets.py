@@ -4,6 +4,7 @@
 
 import math
 
+from quicly.connection import get_cid_from_header
 from quicly.packet import create_quic_packet, QuicPacketType, QuicProtocolVersion, \
     ShortHeaderPacket, decode_quic_packet, \
     LongHeaderPacket, decode_udp_packet, encode_packet_number, decode_packet_number
@@ -134,3 +135,28 @@ def test_udp_packets():
     assert len(packets) == 2
     packets = list(decode_udp_packet(initial_encoded + bytes.fromhex("00 00 00") + initial_encoded))
     assert len(packets) == 2
+
+def test_get_dcid():
+    frames, _ = parse_all_quic_frames(bytes.fromhex("01 1e"))
+    # long header (INITIAL) packets:
+    initial_pkt = create_quic_packet(QuicPacketType.INITIAL, b'', source_cid=sample_scid,
+                                     packet_number=packet_number, payload=frames)
+    initial_data = initial_pkt.encode_all_bytes()
+    decoded_dcid = get_cid_from_header(initial_data, len(sample_dcid))
+    assert decoded_dcid == sample_scid  # INITIAL gives SCID back
+    initial_pkt = create_quic_packet(QuicPacketType.INITIAL, b'', source_cid=sample_dcid,
+                                     packet_number=packet_number, payload=frames)
+    initial_data = initial_pkt.encode_all_bytes()
+    decoded_dcid = get_cid_from_header(initial_data, len(sample_dcid))
+    assert decoded_dcid == sample_dcid
+    # short header packets:
+    onertt_pkt = create_quic_packet(QuicPacketType.ONE_RTT, destination_cid=sample_dcid,
+                                    packet_number=packet_number, payload=frames)
+    onertt_data = onertt_pkt.encode_all_bytes()
+    decoded_dcid = get_cid_from_header(onertt_data, len(sample_dcid))
+    assert decoded_dcid == sample_dcid
+    onertt_pkt = create_quic_packet(QuicPacketType.ONE_RTT, destination_cid=sample_scid,
+                                    packet_number=packet_number, payload=frames)
+    onertt_data = onertt_pkt.encode_all_bytes()
+    decoded_dcid = get_cid_from_header(onertt_data, len(sample_scid))
+    assert decoded_dcid == sample_scid
