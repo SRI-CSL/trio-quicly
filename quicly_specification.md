@@ -233,17 +233,25 @@ PARAM_ID = 0x08 , VALUE_LEN = 0 → bytes: 08 00
 **Client → Server (Initial):**
 
 * Long Header, Version = `0x51554c59`.
-* Frames: CONFIG (possibly empty TLV list), application STREAM data (optional), padding to reach the configured target.
+* Frames: 
+    * CONFIG (possibly empty TLV list if defaults are used).
+    * Application STREAM data (optional).
+    * PADDING to reach the configured target.
 
 The INITIAL packet from the client to the server contains at a minimum a CONFIG frame, which could be empty (Length = 0 or omitted). This is because the original QUIC specification requires a payload of at least 1 byte.
 
 **Server → Client (First Response):**
 
-* ACK for the client Initial.
-* CONFIG-ACK with effective parameters (optional if defaults used).
-* NEW_CONNECTION_ID (optional), application STREAM data (optional).
+* Long Header, Version = `0x51554c59`.
+* Frames:
+    * ACK for the client Initial.
+    * CONFIG-ACK with effective parameters (empty list if defaults used).
+    * NEW_CONNECTION_ID (optional).
+    * Application STREAM data (optional).
 
-After the server’s first response, both endpoints consider the connection established and SHOULD use Short Header packets.
+After the server’s first response, the client responds with an ACK frame for the server's INITIAL.
+When both endpoints have received an ACK of their INITIAL packet, they consider the connection established and SHOULD 
+use Short Header packets.
 
 # Address Validation and Amplification {#address-validation-and-amplification}
 
@@ -278,7 +286,7 @@ PTO_base = SRTT + max(4 * RTTVAR, kGranularity) + max_ack_delay
 ~~~
 
 with a small `kGranularity` (e.g., 1–10 ms) and `max_ack_delay` taken from the peer’s transport parameters (or 0 ms 
-during Handshake).
+during handshake when exchanging INITIAL packets).
 
 ### PTO for Initial Packets
 
@@ -296,21 +304,22 @@ yet been received that newly acknowledges at least one of them.
 QUIC-LY uses a single packet number space (see {{recovery}}) across the handshake and established phases. 
 After ESTABLISHED, endpoints maintain one PTO for Short Header operation.
 
-When to arm: Arm or keep armed whenever at least one ack-eliciting packet is in flight. If the in-flight set 
-transitions from empty to non-empty, arm to `now + PTO_base * 2^pto_count`.
+Arm or keep armed whenever at least one ack-eliciting packet is in flight. If the in-flight ack-eliciting packet/bytes 
+number transitions from empty to non-empty, arm to `now + PTO_base * 2^pto_count` with `pto_count = 0`.
 
-When to cancel: Cancel when no ack-eliciting packets remain in flight, or when entering CLOSING or DRAINING.
+Cancel when no ack-eliciting packets remain in flight, i.e., when transitioning from non-empty to empty, or when 
+entering CLOSING or DRAINING.
 
-When to re-arm on ACK: If an ACK newly acknowledges any ack-eliciting packet, update RTT using the ACK’s delay 
-(scaled by ack_delay_exponent), set `pto_count = 0`. Then, if ack-eliciting packets remain in flight, re-arm to 
+If an ACK newly acknowledges any ack-eliciting packet, update RTT using the ACK’s delay 
+(scaled by ack_delay_exponent) and set `pto_count = 0`. Then, if ack-eliciting packets remain in flight, re-arm to 
 `now + PTO_base`, or cancel the PTO otherwise.
-
 If the ACK is a duplicate (no newly acknowledged packets), leave the PTO unchanged.
 
-On expiry: Send an ack-eliciting probe immediately in Short Header. Prefer new STREAM data; otherwise send PING 
-(MAY add PADDING). Count probes as in-flight. Do not declare loss solely due to PTO firing. Increase backoff 
-(`pto_count += 1`) and re-arm to `now + PTO_base * 2^pto_count`. Endpoints MAY send two ack-eliciting packets on PTO 
-if congestion control permits.
+When the PTO Timer expires, send an ack-eliciting probe immediately with an ack-eliciting packet. 
+Count probes as ack-eliciting in-flight data. 
+Do not declare loss solely due to PTO firing. 
+Increase backoff (`pto_count += 1`) and re-arm to `now + PTO_base * 2^pto_count`. 
+Endpoints MAY send two ack-eliciting packets on PTO expiration if congestion control permits.
 
 ### What to Send When PTO Fires
 
@@ -337,12 +346,11 @@ Upon entering ESTABLISHED, endpoints SHOULD send Short Header packets.
 
 ## Handshake Timeout (Give-up Policy)
 
-QUIC does not specify a fixed “handshake timeout.” For QUIC-LY, an endpoint SHOULD abort
-the handshake if it has not reached ESTABLISHED after either of the following, whichever occurs
-first:
-
-* **N** consecutive Initial PTO expirations (RECOMMENDED `N = 7`), or
-* elapsed time exceeding the endpoint’s configured `idle_timeout_ms` transport parameter.
+QUIC does not specify a fixed “handshake timeout” but uses a `max_idle_timeout` transport parameter.  Until we 
+harmonize QUIC and QUIC-LY transport parameters; see [Issue 12](https://github.com/SRI-CSL/trio-quicly/issues/12), 
+we use the QUIC-LY transport parameter `idle_timeout_ms` to be applied to both, established connections and 
+handshaking. For QUIC-LY, an endpoint SHOULD abort the handshake if it has not reached ESTABLISHED after the elapsed 
+time exceeds the endpoint’s configured `idle_timeout_ms` transport parameter.
 
 To abort, the endpoint SHOULD send CONNECTION_CLOSE (with an appropriate error code) and
 enter DRAINING.
