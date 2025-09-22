@@ -9,9 +9,9 @@ from .packet import QuicPacketType
 from .utils import K_MICRO_SECOND, K_GRANULARITY
 
 # loss detection TODO: move these into configuration!
-K_PACKET_THRESHOLD = 3  # RFC 9002: no smaller than 3
-K_TIME_THRESHOLD = 9 / 8
-K_INITIAL_RTT     = 0.333    # 333 ms, per RFC 9002
+K_PACKET_THRESHOLD = 3      # RFC 9002: no smaller than 3
+K_TIME_THRESHOLD   = 9 / 8
+K_INITIAL_RTT      = 0.333  # 333 ms, per RFC 9002
 
 
 class QuicPacketRecovery:
@@ -62,11 +62,7 @@ class QuicPacketRecovery:
         # self._cc.on_packets_expired(
         #     packets=filter(lambda x: x.in_flight, space.sent_packets.values())
         # )
-        self.space.sent_packets.clear()
-
-        self.space.ack_eliciting_in_flight = 0
-        self.space.ack_eliciting_bytes_in_flight = 0
-        self.space.loss_time = None
+        self.space = PacketNumberSpace()  # discard any current numbers
 
         # reset PTO count
         self.pto_count = 0
@@ -92,14 +88,15 @@ class QuicPacketRecovery:
             return 2 * self._rtt_initial
         return self._rtt_smoothed + max(4 * self._rtt_variance, K_GRANULARITY) + self.max_ack_delay
 
-    def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, now: float) -> bool:
+    def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, now: float) -> tuple[bool, bool]:
         """
         Update metrics as the result of an ACK being received.
-        If we saw an ACK for an INITIAL packet, return True, otherwise return False.
+        If we saw an ACK for an INITIAL packet, return True, otherwise return False in first position.
+        If encountered at least one newly ACK'ed packet number, return True, otherwise return False in second position.
         """
         intervals = ack_to_intervals(ack)  # [(low, high)] descending by high
         if not intervals:
-            return False
+            return False, False
 
         is_ack_eliciting = False
         largest_acked = intervals[0][1]  # first high is largest
@@ -108,7 +105,7 @@ class QuicPacketRecovery:
 
         sent_map = self.space.sent_packets
         if not sent_map:  # Nothing in flight (pure duplicate/late ACK) -> ignore gracefully
-            return False
+            return False, False
 
         # Collect newly-acked PNs we actually have in-flight
         def is_acked(pn: int) -> bool:
@@ -120,7 +117,7 @@ class QuicPacketRecovery:
 
         acked_pns = sorted([pn for pn in list(sent_map.keys()) if is_acked(pn)])
         if not acked_pns:  # No new info; could be a duplicate ACK
-            return False
+            return False, False
 
         largest_newly_acked = max(acked_pns)
         largest_sent_time = None
@@ -133,8 +130,7 @@ class QuicPacketRecovery:
             if sp.ack_eliciting:
                 is_ack_eliciting = True
                 if sp.in_flight:
-                    self.space.ack_eliciting_in_flight -= 1
-                    self.space.ack_eliciting_bytes_in_flight -= sp.size
+                    self.space.decr_ack_eliciting_packets(sp.size)
             if sp.is_initial:
                 # move connection into ESTABLISHED!
                 newly_established = True
@@ -178,25 +174,21 @@ class QuicPacketRecovery:
         self._detect_loss(now=now)
 
         # reset PTO count (unless in INITIAL phase at client, note: INITIAL packet at server should not contain ACKs)
+        # getting to here, we already know that something was newly ack'ed
         if phase != QuicPacketType.INITIAL:
             self.pto_count = 0
 
-        return newly_established
-
-    def on_loss_detection_timeout(self, *, now: float) -> None:
-        loss_space = self._get_loss_space()
-        if loss_space is not None:
-            self._detect_loss(now=now)
-        else:
-            self.pto_count += 1
-            self.reschedule_data(now=now)
+        return newly_established, True
 
     def on_packet_sent(self, packet: SentPacket) -> None:
+        """
+        Record stats when a packet is sent.
+        :param packet: Sent packet metadata.
+        """
         self.space.sent_packets[packet.pn] = packet
 
         if packet.ack_eliciting:
-            self.space.ack_eliciting_in_flight += 1
-            self.space.ack_eliciting_bytes_in_flight += packet.size
+            self.space.incr_ack_eliciting_packets(packet.size)
         if packet.in_flight:
             if packet.ack_eliciting:
                 self._time_of_last_sent_ack_eliciting_packet = packet.time_sent
@@ -206,24 +198,6 @@ class QuicPacketRecovery:
 
             # if self._quic_logger is not None:
             #     self._log_metrics_updated()
-
-    def reschedule_data(self, *, now: float) -> None:
-        """
-        Schedule some data for retransmission.
-        """
-        # if there is any outstanding CRYPTO, retransmit it
-        crypto_scheduled = False
-        packets = tuple(
-            filter(lambda i: i.is_crypto_packet, self.space.sent_packets.values())
-        )
-        if packets:
-            self._on_packets_lost(now=now, packets=packets)
-            crypto_scheduled = True
-        # if crypto_scheduled and self._logger is not None:
-        #     self._logger.debug("Scheduled CRYPTO data for retransmission")
-
-        # ensure an ACK-eliciting packet is sent
-        self._send_probe()
 
     def _detect_loss(self, now: float) -> None:
         """
@@ -281,8 +255,7 @@ class QuicPacketRecovery:
                 lost_packets_cc.append(packet)
 
             if packet.ack_eliciting:
-                self.space.ack_eliciting_in_flight -= 1
-                self.space.ack_eliciting_bytes_in_flight -= packet.size
+                self.space.decr_ack_eliciting_packets(packet.size)
 
             # if self._quic_logger is not None:
             #     self._quic_logger.log_event(

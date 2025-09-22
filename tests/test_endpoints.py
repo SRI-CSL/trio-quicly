@@ -119,5 +119,9 @@ async def test_handshake(ipv6: bool = False) -> None:
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       QuicConfiguration(is_client=True)) as connection:
                 assert connection.state == ConnectionState.ESTABLISHED
-                await trio.sleep(1)  # let handshake finalize for server!?
+                await trio.sleep(1)  # let handshake finalize for server
+                server = cast(QuicServer, _server_endpoint)
+                assert connection.host_cid in server._connections.keys()
+                server_connection = server._connections[connection.host_cid]
+                assert server_connection.state == ConnectionState.ESTABLISHED
             # TODO: check cleanly shutdown?

@@ -198,7 +198,6 @@ class SimpleQuicConnection(trio.abc.Stream):
     async def _on_tx_loop(self):
         async with self.on_tx_recv:
             async for pt, payload in self.on_tx_recv:
-                self._qlog.debug(f"*** Received tuple={(f'{pt}', payload)}", stats=self.on_tx_recv.statistics())
                 if pt == QuicPacketType.INITIAL:
                     qpkt = create_quic_packet(pt,
                                               destination_cid=self.peer_cid.cid,
@@ -291,19 +290,19 @@ class SimpleQuicConnection(trio.abc.Stream):
         if loss_detection_time is None:  # Nothing in flight -> no PTO for this space
             self.pto_timer.cancel()
         else:
-            # TODO: Linda: after testing, remove 20!!!!!!!!!!!!!!!!!!
-            self._qlog.debug(f"Loss Detection Timeout = {loss_detection_time + 20:.3f}")
-            self.pto_timer.set_timer_at(loss_detection_time + 20)
+            self.pto_timer.set_timer_at(loss_detection_time)
+
+    def _get_config_frame(self) -> QuicFrame:
+        ts = [TransportParameter(*tp) for tp in self.configuration.transport_parameters.as_list(exclude_defaults=True)]
+        return QuicFrame(QuicFrameType.CONFIG if self._is_client else QuicFrameType.CONFIG_ACK,
+                         content=ConfigFrame(ts))
 
     def init_handshake(self) -> QuicPacket:
-        ts = [TransportParameter(*tp) for tp in self.configuration.transport_parameters.as_list(exclude_defaults=True)]
-        client_config_frame = QuicFrame(QuicFrameType.CONFIG,
-                                        content=ConfigFrame(ts))
         return create_quic_packet(QuicPacketType.INITIAL,
                                   destination_cid=b'',  # don't need random bits in QUIC-LY!
                                   source_cid=self.host_cid,
                                   packet_number=self._get_and_incr_pn(),
-                                  payload=[client_config_frame])
+                                  payload=[self._get_config_frame()])
 
     async def on_tx(self, qpkt: QuicPacket) -> None:
         possible_ack_frame = self._pn_space.to_ack_frame(QuicFrameType.ACK, now=trio.current_time())
@@ -323,7 +322,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         )
         self._qlog.debug(f"*** on_tx packet={qpkt}", sp=sp)
         self._loss.on_packet_sent(packet=sp)
-        if sp.ack_eliciting:  # if ack-eliciting: arm or re-arm PTO timer:
+        if sp.ack_eliciting:  # ack-eliciting and in-flight
             self._rearm_pto()
         self._qlog.info("Packet sent",
                         size=len(data),
@@ -339,20 +338,34 @@ class SimpleQuicConnection(trio.abc.Stream):
         await self.send_all(data)
 
     def send_probe(self) -> None:
-        self._qlog.info(f"Sending probe at {trio.current_time():.3f} for...")
-        # TODO: signal on_tx() as that is async...
+        if self.is_closing:
+            self._qlog.info(f"PTO Timer expired but connection is closing, so ignoring.")
+            return
+
+        if self.state == ConnectionState.ESTABLISHED:
+            pt = QuicPacketType.ONE_RTT
+            additional_payload = [QuicFrame(QuicFrameType.PING)]
+        else:
+            pt = QuicPacketType.INITIAL
+            additional_payload = []  # TODO: should be CONFIG
+        self._qlog.info(f"*** Sending probe at {trio.current_time():.3f} with type {pt}", state=self.state)
+        try:  # trigger on_tx() through memory channel:
+            self.on_tx_send.send_nowait((pt, additional_payload))
+        except trio.WouldBlock:
+            pass  # ignore if buffer is full, which should not happen at infinite capacity
+
         # when re-arming timer, exponentially back-off:
         self._loss.pto_count += 1
-        self._qlog.debug(f"Increaing PTO count={self._loss.pto_count}")
-        self._rearm_pto()
+        self._qlog.debug(f"Increasing PTO count to {self._loss.pto_count}")
+        # self._rearm_pto()  # TODO: check that the on_tx() rearms the PTO Timer!
 
-    def send_acks(self, pt: QuicPacketType = QuicPacketType.ONE_RTT, additional_payload: list[QuicFrame] = []) -> None:
-        # self._qlog.debug(f"*** ACK timer triggered to send ACK frame", state=self.state, pt=f"{pt}",stats=self.on_tx_send.statistics())
+    def send_acks(self, pt: QuicPacketType = QuicPacketType.ONE_RTT, additional_payload=None) -> None:
+        if additional_payload is None:
+            additional_payload = []
         if self.is_closing:
             return
         # only servers send ACKs in INITIAL to respond to INITIAL, otherwise use 1-RTT:
         pt = QuicPacketType.INITIAL if pt == QuicPacketType.INITIAL and not self._is_client else QuicPacketType.ONE_RTT
-        self._qlog.debug(f"*** Packet Type calculated", state=self.state, pt=f"{pt}",stats=self.on_tx_send.statistics())
         try:  # trigger on_tx() through memory channel:
             self.on_tx_send.send_nowait((pt, additional_payload))
         except trio.WouldBlock:
@@ -441,36 +454,41 @@ class SimpleQuicConnection(trio.abc.Stream):
                     self.peer_cid = QuicConnectionId(init_pkt.source_cid, 0, was_sent=True)
 
             # now handle frames (if payload present):
-            ack_encountered = False
             ack_eliciting = False
             configuration_updated = False
             add_payload_to_ack = []  # only if ACK'ing immediately
+            new_ack_encountered = False
             for qf in qp.payload:
                 if qf.frame_type not in NON_ACK_ELICITING_FRAME_TYPES:
                     ack_eliciting = True
                     self._pn_space.largest_ack_eliciting_pkt = qp.packet_number
 
                 if qf.frame_type in [QuicFrameType.ACK, QuicFrameType.ACK_ECN]:
-                    newly_established = self._loss.on_ack_received(cast(ACKFrame, qf.content), qp.packet_type, trio.current_time())
+                    newly_established, newly_acked = self._loss.on_ack_received(
+                        cast(ACKFrame, qf.content), qp.packet_type, trio.current_time())
                     if newly_established and self.state != ConnectionState.ESTABLISHED:
-                        self._qlog.debug(f"ESTABLISHED connection={hexdump(self.host_cid)}",
-                                         recv_pkt_type=f"{qp.packet_type}")
+                        self._qlog.info(f"ESTABLISHED connection={hexdump(self.host_cid)}",
+                                        recv_pkt_type=f"{qp.packet_type}")
                         self.state = ConnectionState.ESTABLISHED
-                    ack_encountered = True
+                    new_ack_encountered |= newly_acked
                     continue
 
                 if qf.frame_type in [QuicFrameType.CONFIG, QuicFrameType.CONFIG_ACK]:
                     configuration_updated |= self._handle_config(cast(ConfigFrame, qf.content))
                     if qf.frame_type == QuicFrameType.CONFIG:
                         # prepare CONFIG_ACK frame to go with ACK (to elicit ACK from client); even if ts == []
-                        ts = [TransportParameter(*tp) for tp in
-                              self.configuration.transport_parameters.as_list(exclude_defaults=True)]
-                        add_payload_to_ack.append(QuicFrame(QuicFrameType.CONFIG_ACK, content=ConfigFrame(ts)))
+                        add_payload_to_ack.append(self._get_config_frame())
+                    continue
 
                 # TODO: when handling STREAM or DATAGRAM frames: forward their data payload to user of connection:
                 # await connection._q.s.send(data_payload)
-            if ack_encountered:
-                self._rearm_pto()
+
+            if self._pn_space.ack_eliciting_in_flight > 0:
+                if new_ack_encountered:  # only re-arm PTO if we saw a newly ack'ed packet number
+                    self._rearm_pto()
+            else:
+                self.pto_timer.cancel()
+
             if ack_eliciting:
                 max_ack_delay = self.configuration.transport_parameters.max_ack_delay_ms * K_MILLI_SECOND
                 # An endpoint SHOULD generate and send an ACK frame without delay when it receives an ack-eliciting

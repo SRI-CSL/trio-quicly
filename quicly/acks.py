@@ -67,8 +67,8 @@ class PacketNumberSpace:
     largest_received_packet_number: int = -1
     largest_received_time: Optional[float] = None
     # sent packets and loss
-    ack_eliciting_in_flight = 0
-    ack_eliciting_bytes_in_flight = 0
+    _ack_eliciting_in_flight = 0
+    _ack_eliciting_bytes_in_flight = 0
     largest_acked_packet = -1
     loss_time: Optional[float] = None
     sent_packets: Dict[int, SentPacket] = field(default_factory=dict)
@@ -85,6 +85,31 @@ class PacketNumberSpace:
     def largest_ack_eliciting_pkt(self, value):
         if value > self._largest_ack_eliciting_packet:
             self._largest_ack_eliciting_packet = value
+
+    @property
+    def ack_eliciting_in_flight(self):
+        return self._ack_eliciting_in_flight
+
+    def incr_ack_eliciting_packets(self, size: int) -> bool:
+        """
+        Increment counter and current size of in-flight, ack-eliciting packets and note, whether we go from zero or not.
+        :param size: Number of bytes in the ack-eliciting packet to be sent.
+        :return: True, if the numbers were zero before incrementing, False otherwise.
+        """
+        result = True if self._ack_eliciting_in_flight == 0 else False
+        self._ack_eliciting_in_flight += 1
+        self._ack_eliciting_bytes_in_flight += size
+        return result
+
+    def decr_ack_eliciting_packets(self, size: int) -> bool:
+        """
+        Decrement counter and current size of in-flight, ack-eliciting packets and note, whether we go to zero or not.
+        :param size: Number of bytes in the ack-eliciting packet to be discarded.
+        :return: True, if the numbers are zero, False otherwise.
+        """
+        self._ack_eliciting_in_flight -= 1
+        self._ack_eliciting_bytes_in_flight -= size
+        return self._ack_eliciting_in_flight == 0
 
     def note_received(self, pn: int, now: float) -> None:
         if pn > self.largest_received_packet_number:

@@ -71,12 +71,12 @@ class TrioTimer:
                 pass
 
     def set_timer_at(self, deadline: float | None) -> None:
+        if self._deadline is not None and deadline is None:
+            self._qlog.debug(f'{self} disarmed at {trio.current_time():.3f}')
+        if self._deadline is None and deadline is not None:
+            self._qlog.debug(f'{self} armed at {trio.current_time():.3f}', deadline=f'{deadline:.3f}')
         self._deadline = None if deadline is None else deadline
         self._timer_armed.set()  # triggers timer loop to advance from `wait()`
-        if self._deadline is None:
-            self._qlog.debug(f'{self} disarmed at {trio.current_time():.3f}')
-        else:
-            self._qlog.debug(f'{self} armed at {trio.current_time():.3f}', deadline=f'{deadline:.3f}')
 
     def set_timer_after(self, delay: float | None) -> None:
         self.set_timer_at(None if delay is None else trio.current_time() + delay)
