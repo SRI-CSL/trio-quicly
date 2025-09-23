@@ -347,11 +347,13 @@ class SimpleQuicConnection(trio.abc.Stream):
             additional_payload = [QuicFrame(QuicFrameType.PING)]
         else:
             pt = QuicPacketType.INITIAL
-            additional_payload = []  # TODO: should be CONFIG
+            additional_payload = [self._get_config_frame()]  # CONFIG/CONFIG_ACK
         self._qlog.info(f"*** Sending probe at {trio.current_time():.3f} with type {pt}", state=self.state)
         try:  # trigger on_tx() through memory channel:
             self.on_tx_send.send_nowait((pt, additional_payload))
         except trio.WouldBlock:
+            self._qlog.warn(f"*** WouldBlock triggered and prevented tx_send signal at {trio.current_time():.3f}",
+                            stats=self.on_tx_send.statistics())
             pass  # ignore if buffer is full, which should not happen at infinite capacity
 
         # when re-arming timer, exponentially back-off:

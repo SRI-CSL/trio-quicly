@@ -196,8 +196,7 @@ async def serve_quic(
         for server in servers:
             nursery.start_soon(server.serve, connection_handler, handler_nursery, *args)
         # The listeners are already queueing connections when we're called,
-        # but we wait until the end to call started() just in case we get an
-        # error or whatever.
+        # but we wait until the end to call started() just in case we get an error.
         task_status.started(servers)
 
     raise AssertionError("QuicServer.serve should never complete")

@@ -90,3 +90,5 @@ async def open_quic_connection(
     client = QuicClient(client_socket)
     async with client.connect(winning_address, client_configuration) as connection:
         yield cast(SimpleQuicConnection, connection)
+
+    client.dump_qlog()

@@ -1,7 +1,6 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-import logging
 import math
 from contextlib import contextmanager, suppress, asynccontextmanager
 import errno
@@ -186,6 +185,7 @@ class QuicEndpoint:
             stream.close()
         self._new_connections_q.r.close()  # alerts anyone waiting on receive(), e.g., the server or client handshake
         self._send_q.r.close()
+        self.dump_qlog()
 
     def __enter__(self) -> Self:
         return self
@@ -215,8 +215,7 @@ class QuicEndpoint:
             # connection for destination not yet established:
             await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
-            self._qlog.debug(f"~~~ UDP datagram from known connection CID={hexdump(destination_cid)}",
-                             size=len(udp_payload))
+            self._qlog.debug(f"UDP datagram from known CID={hexdump(destination_cid)}", size=len(udp_payload))
             await destination.on_rx(list(decode_udp_packet(udp_payload, destination_cid)), remote_address)
 
     def dump_qlog(self):
@@ -318,9 +317,8 @@ class QuicServer(QuicEndpoint):
                             handler_nursery.start_soon(handle_connection, connection)
                     else:
                         pass  # TODO: log this?
-
         finally:
-            self.dump_qlog()
+            pass  # any server-specific cleanup?
 
 @final
 class QuicClient(QuicEndpoint):
