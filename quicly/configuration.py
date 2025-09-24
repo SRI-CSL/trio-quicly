@@ -133,5 +133,3 @@ class QuicConfiguration:
     """
     QUIC-LY default transport parameters.
     """
-
-    source_cid: bytes = None

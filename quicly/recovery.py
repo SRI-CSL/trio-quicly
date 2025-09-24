@@ -56,23 +56,18 @@ class QuicPacketRecovery:
     # def congestion_window(self) -> int:
     #     return self._cc.congestion_window
 
-    def discard_space(self) -> None:
-        # TODO: rename to reset_space or something...
-
+    def discard_space(self) -> None:  # TODO: rename to reset_space or something...
         # self._cc.on_packets_expired(
         #     packets=filter(lambda x: x.in_flight, space.sent_packets.values())
         # )
         self.space = PacketNumberSpace()  # discard any current numbers
-
-        # reset PTO count
         self.pto_count = 0
-
         # if self._quic_logger is not None:
         #     self._log_metrics_updated()
 
     def get_loss_detection_time(self) -> float | None:
         # loss timer
-        loss_space = self._get_loss_space()
+        loss_space = self._get_loss_space()  # TODO: implement this meaningfully
         if loss_space is not None:
             return loss_space.loss_time
 
@@ -227,7 +222,7 @@ class QuicPacketRecovery:
         self._on_packets_lost(now=now, packets=lost_packets)
 
     def _get_loss_space(self) -> PacketNumberSpace | None:
-        return self.space if self.space.loss_time is not None else None
+        return None
 
     def _log_metrics_updated(self, log_rtt=False) -> None:
         data: Dict[str, Any] = self._cc.get_log_data()

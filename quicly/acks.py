@@ -66,6 +66,7 @@ class PacketNumberSpace:
     _largest_ack_eliciting_packet: int = -1
     largest_received_packet_number: int = -1
     largest_received_time: Optional[float] = None
+    last_successful_rx: Optional[float] = None
     # sent packets and loss
     _ack_eliciting_in_flight = 0
     _ack_eliciting_bytes_in_flight = 0

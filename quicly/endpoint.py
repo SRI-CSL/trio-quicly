@@ -1,11 +1,8 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-import math
 from contextlib import contextmanager, suppress, asynccontextmanager
 import errno
-from pathlib import Path
-
 import trio
 from types import TracebackType
 from typing import *
@@ -13,10 +10,11 @@ import warnings
 
 from .configuration import QuicConfiguration
 from .connection import SimpleQuicConnection, ConnectionState, get_cid_from_header
-from .exceptions import QuicProtocolError
+from .exceptions import QuicProtocolError, QuicErrorCode
+from .frame import ConnectionCloseFrame, QuicFrame, QuicFrameType
 from .logger import QlogMemoryCollector, init_logging, make_qlog
 from .packet import MAX_UDP_PACKET_SIZE, decode_udp_packet
-from .utils import _Queue, AddressFormat, PosArgsT, hexdump
+from .utils import _Queue, AddressFormat, PosArgsT, hexdump, K_MILLI_SECOND
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
 @contextmanager
@@ -315,8 +313,6 @@ class QuicServer(QuicEndpoint):
                             # first successful handshake: note connection for future packet delivery
                             self._connections[connection.host_cid] = connection
                             handler_nursery.start_soon(handle_connection, connection)
-                    else:
-                        pass  # TODO: log this?
         finally:
             pass  # any server-specific cleanup?
 
@@ -332,8 +328,6 @@ class QuicClient(QuicEndpoint):
         self,
         target_address: AddressFormat,  # could be 2-tuple (IPv4) or 4-tuple (IPv6)
         client_configuration: QuicConfiguration | None = None,
-        connection_established_timeout: float = 30.0,  # TODO: establish default of 5-10s?
-        initial_retransmit_timeout: float = 1.0,
     ) -> AsyncGenerator[SimpleQuicConnection, Any]:
         """Initiate an outgoing QUIC connection, which entails the handshake.  As QUIC 
         is based on UDP, we cannot reliably resolve the remote address until after receiving
@@ -352,24 +346,8 @@ class QuicClient(QuicEndpoint):
             does not resolve to localhost as a remote address.  Use the IPv6 wildcard address
             "::" only for servers that bind to them to all interfaces on localhost.
           client_configuration: The client configuration to use (or None for default values)
-          connection_established_timeout: how many seconds before giving up on initial connection establishment.
-
-          initial_retransmit_timeout: Since UDP is an unreliable protocol, it's
-            possible that some of the packets we send during the handshake will get
-            lost. To handle this, QUIC-LY uses a timer to automatically retransmit
-            handshake packets that don't receive a response. This lets you set the
-            timeout we use to detect packet loss. Ideally, it should be set to ~1.5
-            times the round-trip time to your peer, but 1 second is a reasonable
-            default. There's `some useful guidance here
-            <https://tlswg.org/dtls13-spec/draft-ietf-tls-dtls13.html#name-timer-values>`__.
-
-            This is the *initial* timeout, because if packets keep being lost then we
-            will automatically back off to longer values, to avoid overloading the
-            network.
-
         Returns:
           SimpleQuicConnection
-
         """
         self._check_closed()
 
@@ -384,8 +362,8 @@ class QuicClient(QuicEndpoint):
                                               configuration=client_configuration)
             connection.start_background(nursery)
 
-            connection_established_timeout = math.inf  # TODO: Linda: remove after testing!
-            with trio.move_on_after(connection_established_timeout) as cancel_scope:
+            with trio.move_on_after(connection.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND) \
+                    as cancel_scope:
                 initial_pkt = connection.init_handshake()
                 await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed
                 async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
@@ -397,11 +375,17 @@ class QuicClient(QuicEndpoint):
                         self._connections[connection.host_cid] = connection  # clients only use 1 connection
                         # now datagrams will be delivered directly to this connection!
                         break
-            if connection.is_closed or cancel_scope.cancelled_caught:
-                raise QuicProtocolError("Could not establish QUIC connection")
 
             try:
-                yield connection  # give caller control; loops continue running in the nursery
+                if connection.is_closed or cancel_scope.cancelled_caught:
+                    self._qlog.warning(f"Could not establish QUIC connection to {target_address} - exiting.")
+                    connection.peer_cid.cid = connection.host_cid  # we haven't established a valid peer address yet
+                    timeout_frame = ConnectionCloseFrame(QuicErrorCode.NO_ERROR,
+                                                         reason=b'Idle timeout during handshake reached.')
+                    connection.send_closing([QuicFrame(QuicFrameType.TRANSPORT_CLOSE, content=timeout_frame)])
+                    # raise QuicProtocolError("Could not establish QUIC connection")
+                else:
+                    yield connection  # give caller control; loops continue running in the nursery
             finally:
                 # on context exit: cancel everything cleanly
                 nursery.cancel_scope.cancel()
