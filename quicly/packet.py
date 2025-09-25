@@ -11,7 +11,7 @@ from typing import *
 
 from .exceptions import QuicProtocolViolation
 from .frame import encode_var_length_int, decode_var_length_int, QuicFrame, parse_all_quic_frames, \
-    NON_ACK_ELICITING_FRAME_TYPES
+    NON_ACK_ELICITING_FRAME_TYPES, QuicFrameType
 
 MAX_UDP_PACKET_SIZE = 65527
 
@@ -92,6 +92,10 @@ class QuicPacket:
     def is_ack_eliciting(self) -> bool:
         # Packets that contain at least one ack-eliciting frame are called ack-eliciting packets.
         return any(f.frame_type not in NON_ACK_ELICITING_FRAME_TYPES for f in self.payload)
+
+    def is_closing(self) -> bool:
+        return any(f.frame_type in [QuicFrameType.TRANSPORT_CLOSE, QuicFrameType.APPLICATION_CLOSE]
+                   for f in self.payload)
 
 @dataclass
 class LongHeaderPacket(QuicPacket):

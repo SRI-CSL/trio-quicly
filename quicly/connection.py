@@ -99,7 +99,7 @@ class SimpleQuicConnection(trio.abc.Stream):
 
         # state management:
         self._closed = False
-        self.idle_timer = TrioTimer("client" if self._is_client else "server", callback_fn=self.send_closing, )
+        self._idle_timer = TrioTimer("client" if self._is_client else "server", callback_fn=self.send_closing, )
         self.state = ConnectionState.LISTEN
 
         # connection IDs:
@@ -139,8 +139,9 @@ class SimpleQuicConnection(trio.abc.Stream):
         self.on_tx_send, self.on_tx_recv = trio.open_memory_channel(math.inf)  # buffer indefinitely
         self._q = _Queue[bytes](incoming_packets_buffer)
         self._loops_spawned = False
+
         self._qlog = make_qlog("client" if self._is_client else "server", category="transport").bind(
-            odcid_hex=hexdump(self.host_cid))
+            current_state=lambda: self.state, odcid_hex=lambda: hexdump(self.host_cid))
 
     @property
     def configuration(self) -> QuicConfiguration:
@@ -167,13 +168,11 @@ class SimpleQuicConnection(trio.abc.Stream):
         """
         if self._closed:
             return
-        self.state = ConnectionState.DRAINING if self.state == ConnectionState.CLOSING else ConnectionState.CLOSING
         self._closed = True
         self.sending_ch.close()
         # TODO: how to communicate to Endpoint?
         # if self.endpoint.connections.get(self.remote_address) is self:
         #     del self.endpoint.connections[self.remote_address]
-
         # Will wake any tasks waiting on self.q.r.receive() with a ClosedResourceError:
         self._q.r.close()
 
@@ -189,8 +188,7 @@ class SimpleQuicConnection(trio.abc.Stream):
 
     async def aclose(self) -> None:
         """Close this connection, but asynchronously.
-        This is included to satisfy the `trio.abc.Stream` contract. It's
-        identical to `close`, but async.
+        This is included to satisfy the `trio.abc.Stream` contract. It's identical to `close`, but async.
         """
         self.close()
         await trio.lowlevel.checkpoint()
@@ -213,28 +211,28 @@ class SimpleQuicConnection(trio.abc.Stream):
                 await self.on_tx(qpkt)
 
     def start_background(self, nursery: trio.Nursery) -> None:
-        nursery.start_soon(self.idle_timer.timer_loop, )
+        nursery.start_soon(self._idle_timer.timer_loop, )
         nursery.start_soon(self.pto_timer.timer_loop, )
         nursery.start_soon(self._ack_timer.timer_loop, )
         nursery.start_soon(self._on_tx_loop, )
 
-    # def _arm_pto(self, space, now):
-    #     if not self._ack_eliciting_in_flight(space):
-    #         self.pto_deadline[space] = None
-    #         if self._pto_event[space].statistics().tasks_waiting:  # optional
-    #             self._pto_event[space].set()
-    #         return
-    #     base = self._compute_pto(space)  # srtt + max(4*var, granularity) + max_ack_delay
-    #     eff = base * (2 ** self.pto_count[space])  # backoff
-    #     self.pto_deadline[space] = now + eff
-    #     self._pto_event[space].set()  # wake loop to re-schedule
-    #
-    # async def _on_pto_fire(self, space):
-    #     # Send a probe (Initial: retransmit CONFIG; 1-RTT: any ack-eliciting probe)
-    #     self._send_probe(space)
-    #     self.pto_count[space] += 1
-    #     # Re-arm based on new now:
-    #     self._arm_pto(space, trio.current_time())
+    async def enter_closing(self) -> None:
+        if self.state == ConnectionState.ESTABLISHED:
+            # try to send one more CONNECTION_CLOSE:
+            close_frame = ConnectionCloseFrame(QuicErrorCode.NO_ERROR, reason=b'aclose()')
+            await self.on_tx(
+                create_quic_packet(QuicPacketType.ONE_RTT,
+                                   self.peer_cid.cid,
+                                   packet_number=self._get_and_incr_pn(),
+                                   payload=[QuicFrame(QuicFrameType.APPLICATION_CLOSE, content=close_frame)]))
+        await self.aclose()
+
+    def enter_draining(self) -> None:
+        self.state = ConnectionState.DRAINING
+        # cancel timers
+        self._ack_timer.cancel()
+        self._idle_timer.cancel()
+        self.pto_timer.cancel()
 
     def _get_and_incr_pn(self) -> int:
         next_pn = self._next_pn_tx
@@ -310,11 +308,23 @@ class SimpleQuicConnection(trio.abc.Stream):
         if self.is_closed:
             self._qlog.debug(f"Attempting to send QUIC packet after connection closed - dropping.", packet=qpkt)
             return
+
         possible_ack_frame = self._pn_space.to_ack_frame(QuicFrameType.ACK, now=trio.current_time())
         if possible_ack_frame is not None:
             qpkt.payload.append(possible_ack_frame)
+            # When PNSpace._intervals grows beyond a threshold, call drop_acked_up_to(cutoff) where cutoff
+            # is the high end of the N-th most recent interval we still want to retain. This keeps memory
+            # bounded and still re-advertises recent history if prior ACKs were lost.
+            N = self.configuration.max_ack_intervals
+            if N == 0:  # drop everything
+                self._pn_space.drop_acked_up_to(self._pn_space.largest_acked_packet)
+            elif len(self._pn_space) > N:
+                older = self._pn_space[:-N]  # ascending by low: everything before last N is older
+                self._pn_space.drop_acked_up_to(older[-1][1])  # cutoff is HIGH of the last older interval
+
         if len(qpkt.payload) == 0:
             return  # by now, we should have at least one frame; if not, this was a timer expiring but no action items
+
         data = qpkt.encode_all_bytes()
         sp = SentPacket(
             qpkt.packet_number,
@@ -325,28 +335,29 @@ class SimpleQuicConnection(trio.abc.Stream):
             is_initial=(qpkt.packet_type == QuicPacketType.INITIAL),
             frames=[fr for fr in qpkt.payload if fr.frame_type in NON_ACK_ELICITING_FRAME_TYPES]
         )
-        self._qlog.debug(f"*** on_tx packet={qpkt}", sp=sp)
+        self._qlog.debug(f"*** on_tx()", sp=sp)  # TODO: remove after implementing proper QLOG below
         self._loss.on_packet_sent(packet=sp)
         if sp.ack_eliciting:  # ack-eliciting and in-flight
             self._rearm_pto()
             if self._pn_space.last_successful_rx is not None:
                 # restart idle timeout if sending the first ack-eliciting packet since the last successful RX
-                self.idle_timer.set_timer_after(max(
+                self._idle_timer.set_timer_after(max(
                     self.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND,
                     3 * self._loss.get_probe_timeout()))
                 self._pn_space.last_successful_rx = None
+
         self._qlog.info("Packet sent",
                         size=len(data),
                         data={"header": {"packet_type": str(qpkt.packet_type),
                                          "packet_number": qpkt.packet_number,
                                                         # TODO: use convenience methods from qlog.py
                                          }})
-        # submit to endpoint for sending as bytes payload:
+
         if qpkt.packet_type == QuicPacketType.INITIAL and self._is_client:
             # Any datagram sent by the client that contains an Initial packet must be padded to a length of
             # INITIAL_PADDING_TARGET bytes. This library does it by appending nul bytes to the datagram.
             data = data.ljust(self.configuration.transport_parameters.initial_padding_target, b'\x00')
-        await self.send_all(data)
+        await self.send_all(data, qpkt.is_closing())
 
     def send_probe(self) -> None:
         if self.is_closing:
@@ -392,9 +403,7 @@ class SimpleQuicConnection(trio.abc.Stream):
         if self.is_closing:
             self._qlog.info(f"Connection is already closing, so ignoring.")
             return
-        """
-        After sending a CONNECTION_CLOSE frame, an endpoint immediately enters the closing state.
-        """
+
         if self.state == ConnectionState.ESTABLISHED:
             pt = QuicPacketType.ONE_RTT
         elif self.state == ConnectionState.LISTEN:
@@ -408,7 +417,6 @@ class SimpleQuicConnection(trio.abc.Stream):
                                                                reason=b'Idle timeout reached.'))]
         try:  # trigger on_tx() through memory channel:
             self.on_tx_send.send_nowait((pt, payload))
-            self.state = ConnectionState.CLOSING
         except trio.WouldBlock:
             self._qlog.warn(f"*** WouldBlock (send_acks) triggered and prevented tx_send signal at {trio.current_time():.3f}",
                             stats=self.on_tx_send.statistics())
@@ -518,11 +526,10 @@ class SimpleQuicConnection(trio.abc.Stream):
                     continue
 
                 if qf.frame_type in [QuicFrameType.TRANSPORT_CLOSE, QuicFrameType.APPLICATION_CLOSE]:
-                    self.state = ConnectionState.DRAINING
                     """The draining state is entered once an endpoint receives a CONNECTION_CLOSE frame, 
                     which indicates that its peer is closing or draining. While otherwise identical to the closing 
                     state, an endpoint in the draining state MUST NOT send any packets."""
-                    pass  # TODO: what else?
+                    self.enter_draining()
 
                 if qf.frame_type in [QuicFrameType.CONFIG, QuicFrameType.CONFIG_ACK]:
                     configuration_updated |= self._handle_config(cast(ConfigFrame, qf.content))
@@ -541,8 +548,8 @@ class SimpleQuicConnection(trio.abc.Stream):
                 self.pto_timer.cancel()
 
             # restart idle timer to configured timeout but at least 3x the current PTO timeout
-            self.idle_timer.set_timer_after(max(self.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND,
-                                                3 * self._loss.get_probe_timeout()))
+            self._idle_timer.set_timer_after(max(self.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND,
+                                                 3 * self._loss.get_probe_timeout()))
             self._pn_space.last_successful_rx = trio.current_time()  # used to decide if we do the first TX of an
                                                                      # ack-liciting packet after last successful RX
 
@@ -568,7 +575,10 @@ class SimpleQuicConnection(trio.abc.Stream):
                 else:
                     self.send_acks(qp.packet_type, add_payload_to_ack)  # initiate on_tx() immediately!
 
-    async def send_all(self, data: bytes | bytearray | memoryview) -> None:
+            if self.state == ConnectionState.DRAINING:
+                await self.aclose()
+
+    async def send_all(self, data: bytes | bytearray | memoryview, contains_close: bool = False) -> None:
         """
         Schedules this data blob for sending at endpoint.
         """
@@ -576,6 +586,10 @@ class SimpleQuicConnection(trio.abc.Stream):
             raise trio.ClosedResourceError("connection was already closed")
         # TODO: if QUIC Streams are also HalfClosable then do more state checking here...?
         await self.sending_ch.send((data, self.remote_address))
+        if contains_close:
+            # After sending a CONNECTION_CLOSE frame, an endpoint immediately enters the closing state.
+            # Don't change current state if already closing.
+            self.state = ConnectionState.CLOSING if not self.is_closing else self.state
 
     async def wait_send_all_might_not_block(self) -> None:
         """Block until it's possible that :meth:`send_all` might not block.

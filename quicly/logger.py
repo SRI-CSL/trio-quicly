@@ -59,6 +59,15 @@ config_dict = {
     },
 }
 
+def eval_callables(_logger, _method, event_dict):
+    for k, v in list(event_dict.items()):
+        if callable(v):
+            try:
+                event_dict[k] = v()
+            except Exception as e:
+                event_dict[k] = f"<callable {v!r} raised {e!r}>"
+    return event_dict
+
 def _trio_time_ms() -> int:
     global _QLOG_START
     if _QLOG_START is None:
@@ -136,6 +145,7 @@ def init_logging() -> tuple[Any, None] | tuple[Any, QlogMemoryCollector]:
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
+            eval_callables,                              # evaluate bound callables here
             add_qlog_time,                               # adds "time" (ms since start)
             _collector,                                  # collect all logged events in memory for QLOG file(s)
             structlog.stdlib.filter_by_level,            # filter here for other processors
@@ -164,5 +174,6 @@ def make_qlog(vantage: Vantage, category: str, group_id: str | None = None):
     return (
         structlog.get_logger(QUIC_LOG).bind(vantage=vantage,
                                             category=category,
-                                            group_id=group_id or str(uuid.uuid4()))
+                                            # group_id=group_id or str(uuid.uuid4())
+                                            )
     )

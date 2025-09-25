@@ -77,7 +77,7 @@ class QuicEndpoint:
         self._token = trio.lowlevel.current_trio_token()  # TODO: still needed?
 
         self._new_connections_q = _Queue[tuple[bytes, tuple[str, int], bytes]](float("inf"))
-        self._send_q = _Queue[tuple[bytes, tuple[str, int]]](0)  # unbuffered sending Q for tuples (UDP payload, remote address)
+        self._send_q = _Queue[tuple[bytes, tuple[str, int]]](10)  # unbuffered sending Q for tuples (UDP payload, remote address)
 
         # tracking ESTABLISHED connections:
         self._connections: dict[bytes, SimpleQuicConnection] = {}  # {destination CID: QUIC connection}
@@ -242,7 +242,6 @@ class QuicServer(QuicEndpoint):
         self._qlog = make_qlog("server", "connectivity")
 
     def close(self) -> None:
-        # TODO: will this be invoked from QuicServer(Endpoint).aclose()?
         for stream in list(self._new_connections.values()):  # if any still pending
             stream.close()
         super().close()

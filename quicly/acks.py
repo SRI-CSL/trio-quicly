@@ -1,7 +1,7 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-
+from collections.abc import Sequence, Iterator
 from dataclasses import dataclass, field
 from typing import *
 
@@ -59,7 +59,7 @@ class SentPacket:
     frames: list[QuicFrame] = field(default_factory=list)  # whatever you need to retransmit if lost?
 
 @dataclass
-class PacketNumberSpace:
+class PacketNumberSpace(Sequence[Interval]):
     # prior coed: class QuicPacketSpace:
     # ack_at: Optional[float] = None
     # expected_packet_number: int = 0
@@ -90,6 +90,35 @@ class PacketNumberSpace:
     @property
     def ack_eliciting_in_flight(self):
         return self._ack_eliciting_in_flight
+
+    # --- sequence delegation ---
+    def __len__(self) -> int:
+        return len(self._intervals)
+
+    def __iter__(self) -> Iterator[Interval]:
+        return iter(self._intervals)
+
+    def __reversed__(self) -> Iterator[Interval]:
+        return reversed(self._intervals)
+
+    @overload
+    def __getitem__(self, index: int) -> Interval:
+        ...
+
+    @overload
+    def __getitem__(self, index: slice) -> List[Interval]:
+        ...
+
+    def __getitem__(self, index):  # type: ignore[override]
+        return self._intervals[index]
+
+    # Optional: make `n in pns` work for both an interval or a PN
+    def __contains__(self, x: object) -> bool:
+        if isinstance(x, tuple) and len(x) == 2:
+            return x in self._intervals
+        if isinstance(x, int):
+            return any(lo <= x <= hi for lo, hi in self._intervals)
+        return False
 
     def incr_ack_eliciting_packets(self, size: int) -> bool:
         """

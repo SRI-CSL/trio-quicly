@@ -133,3 +133,8 @@ class QuicConfiguration:
     """
     QUIC-LY default transport parameters.
     """
+
+    max_ack_intervals: int = 10
+    """
+    The maximum number of ACK intervals to retain after sending an ACK Frame.
+    """
