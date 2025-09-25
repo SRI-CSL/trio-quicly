@@ -481,6 +481,28 @@ def test_new_connection_id_frame_validation_errors():
             reset_token=b"\x00" * 15,
         )
 
+def test_transport_close_defaults_unknown_trigger_to_padding():
+    cc = ConnectionCloseFrame(errno=42, reason=b"oops", frame_type=None)
+    qf = QuicFrame(QuicFrameType.TRANSPORT_CLOSE, content=cc)
+    assert isinstance(qf.content, ConnectionCloseFrame)
+    # Unknown trigger should become PADDING (0x00)
+    assert qf.content.frame_type == QuicFrameType.PADDING
+
+def test_transport_close_preserves_explicit_trigger():
+    cc = ConnectionCloseFrame(errno=1, reason=b"err", frame_type=QuicFrameType.PING)
+    qf = QuicFrame(QuicFrameType.TRANSPORT_CLOSE, cc)
+    assert qf.content.frame_type == QuicFrameType.PING
+
+def test_application_close_strips_trigger_field():
+    # Even if a frame_type is provided, APPLICATION_CLOSE must not carry it
+    cc = ConnectionCloseFrame(errno=0xdead, reason=b"app", frame_type=QuicFrameType.PING)
+    qf = QuicFrame(QuicFrameType.APPLICATION_CLOSE, cc)
+    assert qf.content.frame_type is None
+
+def test_padding_cannot_have_content():
+    with pytest.raises(ValueError):
+        QuicFrame(QuicFrameType.PADDING, ConnectionCloseFrame(errno=0, reason=b"x", frame_type=None))
+
 def test_iterating_frames():
     # Compose a stream of frames (e.g., PADDING + MAX_DATA + PADDING)
     data = b''.join([
@@ -493,6 +515,3 @@ def test_iterating_frames():
     assert len(frames) == 3
     assert frames[1].frame_type == QuicFrameType.MAX_DATA
     assert consumed == 4
-
-def test_config_frames():
-    pass

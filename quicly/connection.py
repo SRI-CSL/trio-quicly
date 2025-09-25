@@ -219,7 +219,8 @@ class SimpleQuicConnection(trio.abc.Stream):
     async def enter_closing(self) -> None:
         if self.state == ConnectionState.ESTABLISHED:
             # try to send one more CONNECTION_CLOSE:
-            close_frame = ConnectionCloseFrame(QuicErrorCode.NO_ERROR, reason=b'aclose()')
+            close_frame = ConnectionCloseFrame(QuicErrorCode.APPLICATION_ERROR,
+                                               reason=b'aclose()')  # APP_CLOSE does not include frame type!
             await self.on_tx(
                 create_quic_packet(QuicPacketType.ONE_RTT,
                                    self.peer_cid.cid,

@@ -90,8 +90,8 @@ class QuicFrameType(IntEnum):
     TRANSPORT_CLOSE = 0x1C
     APPLICATION_CLOSE = 0x1D
     # once we support DATAGRAMs (see https://www.rfc-editor.org/rfc/rfc9221.html)
-    # DATAGRAM = 0x30
-    # DATAGRAM_WITH_LENGTH = 0x31
+    DATAGRAM = 0x30
+    DATAGRAM_WITH_LENGTH = 0x31
     # # QUIC-LY frame types:
     CONFIG = 0x3a
     CONFIG_ACK = 0x3b
@@ -119,8 +119,8 @@ class QuicFrameType(IntEnum):
             self.PATH_RESPONSE: "Path Response Frame",
             self.TRANSPORT_CLOSE: "Transport Close Frame",
             self.APPLICATION_CLOSE: "Application Close Frame",
-            # self.DATAGRAM: "Datagram Frame",
-            # self.DATAGRAM_WITH_LENGTH: "Datagram With Length Frame",
+            self.DATAGRAM: "Datagram Frame",
+            self.DATAGRAM_WITH_LENGTH: "Datagram With Length Frame",
             self.CONFIG: "Config Frame",
             self.CONFIG_ACK: "Config ACK Frame",
         }
@@ -146,14 +146,14 @@ NON_ACK_ELICITING_FRAME_TYPES = frozenset(
 #         QuicFrameType.APPLICATION_CLOSE,
 #     ]
 # )
-PROBING_FRAME_TYPES = frozenset(
-    [
-        QuicFrameType.PATH_CHALLENGE,
-        QuicFrameType.PATH_RESPONSE,
-        QuicFrameType.PADDING,
-        QuicFrameType.NEW_CONNECTION_ID,
-    ]
-)
+# PROBING_FRAME_TYPES = frozenset(
+#     [
+#         QuicFrameType.PATH_CHALLENGE,
+#         QuicFrameType.PATH_RESPONSE,
+#         QuicFrameType.PADDING,
+#         QuicFrameType.NEW_CONNECTION_ID,
+#     ]
+# )
 
 
 @dataclass
@@ -190,6 +190,14 @@ class QuicFrame:
         if self.frame_type in [QuicFrameType.PADDING, QuicFrameType.PING]:
             if self.content:
                 raise ValueError(f"QUIC {self.frame_type} cannot have content")
+        if self.frame_type == QuicFrameType.TRANSPORT_CLOSE:
+            conn_close_frame = cast(ConnectionCloseFrame, self.content)
+            if conn_close_frame.frame_type is None:
+                # TRANSPORT_CLOSE denotes unknown trigger frame type as 0x00 (PADDING)
+                conn_close_frame.frame_type = QuicFrameType.PADDING
+        elif self.frame_type == QuicFrameType.APPLICATION_CLOSE:
+            conn_close_frame = cast(ConnectionCloseFrame, self.content)
+            conn_close_frame.frame_type = None  # APP_CLOSE should not carry frame type
 
     def encode(self) -> bytes:
         var_int = encode_var_length_int(self.frame_type)
@@ -219,11 +227,11 @@ class QuicFrame:
         # Content-bearing frames: decode everything after first byte
         subtype_cls = FRAME_TYPE_TO_CLASS.get(frame_type)
         if subtype_cls is not None:
-            # special cases: pass frame_type in
-            if frame_type in (QuicFrameType.ACK, QuicFrameType.ACK_ECN):
+            # special cases: pass frame_type in to decode properly
+            if frame_type in [QuicFrameType.ACK, QuicFrameType.ACK_ECN,
+                              QuicFrameType.TRANSPORT_CLOSE, QuicFrameType.APPLICATION_CLOSE,
+                              QuicFrameType.DATAGRAM, QuicFrameType.DATAGRAM_WITH_LENGTH]:
                 content, offset = subtype_cls.decode(data[1:], frame_type=frame_type)
-            elif frame_type in (QuicFrameType.TRANSPORT_CLOSE, QuicFrameType.APPLICATION_CLOSE):
-                content, offset = subtype_cls.decode(data[1:], is_transport=frame_type == QuicFrameType.TRANSPORT_CLOSE)
             else:
                 content, offset = subtype_cls.decode(data[1:])
             return cls(frame_type, content=content), offset + 1
@@ -643,13 +651,32 @@ class ConnectionCloseFrame(FrameSubtype):
         )
 
     @classmethod
-    def decode(cls, data: bytes, is_transport: bool = True) -> tuple["ConnectionCloseFrame", int]:
+    def decode(cls, data: bytes, frame_type: QuicFrameType = QuicFrameType.TRANSPORT_CLOSE) -> tuple["ConnectionCloseFrame", int]:
         errno, offset = decode_var_length_int(data)
-        frame_type = None
-        if is_transport:
-            frame_type, offset = decode_var_length_int(data[offset:], offset)
+        trigger_frame_type = None  # denotes what triggered error if TRANSPORT_CLOSE
+        if frame_type == QuicFrameType.TRANSPORT_CLOSE:
+            trigger_frame_type, offset = decode_var_length_int(data[offset:], offset)
         length, offset = decode_var_length_int(data[offset:], offset)
-        return cls(errno, data[offset:offset + length], frame_type), offset + length
+        return cls(errno, data[offset:offset + length], trigger_frame_type), offset + length
+
+
+@register_frame_type(QuicFrameType.DATAGRAM)
+@register_frame_type(QuicFrameType.DATAGRAM_WITH_LENGTH)
+@dataclass
+class DatagramFrame(FrameSubtype):
+    datagram_data: bytes
+    length: Optional[int] = None
+
+    def encode(self) -> bytes:
+        return (encode_var_length_int(self.length) if self.length is not None else b'') + self.datagram_data
+
+    @classmethod
+    def decode(cls, data: bytes, frame_type: int = QuicFrameType.DATAGRAM) -> tuple["DatagramFrame", int]:
+        if frame_type == QuicFrameType.DATAGRAM:
+            return cls(datagram_data=data), len(data)
+        # must be of type DATAGRAM_WITH_LENGTH:
+        length, offset = decode_var_length_int(data)
+        return cls(datagram_data=data[offset:offset + length], length=length), offset + length
 
 
 @dataclass
