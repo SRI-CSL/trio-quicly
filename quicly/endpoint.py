@@ -8,12 +8,14 @@ from types import TracebackType
 from typing import *
 import warnings
 
+from pip._internal.configuration import Configuration
+
 from .configuration import QuicConfiguration
 from .connection import SimpleQuicConnection, ConnectionState, get_cid_from_header
 from .exceptions import QuicProtocolError, QuicErrorCode
 from .frame import ConnectionCloseFrame, QuicFrame, QuicFrameType
 from .logger import QlogMemoryCollector, init_logging, make_qlog
-from .packet import MAX_UDP_PACKET_SIZE, decode_udp_packet
+from .packet import MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicPacketType
 from .utils import _Queue, AddressFormat, PosArgsT, hexdump, K_MILLI_SECOND
 # from .stream import QuicStream, QuicBidiStream, QuicSendStream, QuicReceiveStream
 
@@ -132,8 +134,8 @@ class QuicEndpoint:
         try:
             while True:
                 try:
-                    udp_packet, address = await self.socket.recvfrom(MAX_UDP_PACKET_SIZE)
-                    self._qlog.debug(f"recvfrom: {len(udp_packet)} bytes from {address}")
+                    udp_payload, address = await self.socket.recvfrom(MAX_UDP_PACKET_SIZE)
+                    self._qlog.debug(f"recvfrom: {len(udp_payload)} bytes from {address}")
                 except OSError as exc:
                     if exc.errno == errno.ECONNRESET:
                         # Windows only: "On a UDP-datagram socket [ECONNRESET]
@@ -145,7 +147,7 @@ class QuicEndpoint:
                         continue
                     else:
                         raise
-                await self._datagram_received(udp_packet, address)
+                await self._datagram_received(udp_payload, address)
         except trio.ClosedResourceError:
             # socket was closed
             return
@@ -210,7 +212,7 @@ class QuicEndpoint:
             return
         destination = self._connections.get(destination_cid, None)
         if destination is None:
-            # connection for destination not yet established:
+            # connection for this DCID not yet established:
             await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
             self._qlog.debug(f"UDP datagram from known CID={hexdump(destination_cid)}", size=len(udp_payload))
@@ -250,6 +252,7 @@ class QuicServer(QuicEndpoint):
         self,
         handler: Callable[[SimpleQuicConnection, Unpack[PosArgsT]], Awaitable[object]],
         handler_nursery: trio.Nursery,
+        server_configuration: QuicConfiguration | None = None,
         *args: Unpack[PosArgsT],
         task_status: trio.TaskStatus[None] = trio.TASK_STATUS_IGNORED,
     ) -> None:
@@ -269,6 +272,7 @@ class QuicServer(QuicEndpoint):
                 # ... do other things here ...
 
         Args:
+          :param server_configuration: If given, must have `is_client = False` set
           :param handler: The handler function that will be invoked for each new,
             incoming connection.
           :param handler_nursery: The nursery to use for handling each connection;
@@ -278,6 +282,10 @@ class QuicServer(QuicEndpoint):
 
         """
         self._check_closed()
+        if server_configuration is None:
+            server_configuration = QuicConfiguration(is_client=False)
+        else:
+            assert not server_configuration.is_client
 
         try:
             task_status.started()
@@ -295,23 +303,38 @@ class QuicServer(QuicEndpoint):
                     connection = self._new_connections.get(destination_cid, None)
                     if connection is None:
                         self._qlog.debug(f"~~~ Starting NEW connection CID={hexdump(destination_cid)}")
-                        server_config = QuicConfiguration(is_client=False)
                         connection = SimpleQuicConnection(self._send_q.s.clone(),
                                                           remote_address,
                                                           self.connection_id_length,
                                                           self.incoming_packets_buffer,
-                                                          server_config)
+                                                          server_configuration)
                         self._new_connections[destination_cid] = connection
                         connection.start_background(nursery)
-                    else:
-                        self._qlog.debug(f"~~~ Serving existing NEW connection CID={hexdump(destination_cid)}")
 
-                    if await connection.do_handshake(payload, remote_address):
-                        assert connection.peer_cid.cid == destination_cid
-                        if connection.host_cid not in self._connections.keys():
-                            # first successful handshake: note connection for future packet delivery
-                            self._connections[connection.host_cid] = connection
-                            handler_nursery.start_soon(handle_connection, connection)
+                    if connection.state == ConnectionState.LISTEN:
+                        if await connection.start_handshake(payload, remote_address):
+                            assert connection.peer_cid.cid == destination_cid
+                        if connection.state == ConnectionState.ACCEPT:
+                            # switched from LISTEN to ACCEPT: change key for _new_connections to host_cid!
+                            self._new_connections[connection.host_cid] = connection
+                    elif connection.state == ConnectionState.ACCEPT:
+                        self._qlog.debug(f"~~~ Serving accepted NEW connection CID={hexdump(destination_cid)}")
+                        await connection.on_rx(list(decode_udp_packet(payload, destination_cid)), remote_address)
+                    elif connection.state == ConnectionState.ESTABLISHED:
+                        # should not happen?
+                        self._qlog.warn(f"~~~ Should not serve established NEW connection here...",
+                                        dcid=hexdump(destination_cid), remote_addr=remote_address)
+                    else:
+                        self._qlog.warn(f"Cannot serve UDP payload in current state",
+                                        current_state=connection.state, dcid=hexdump(destination_cid),
+                                        remote_addr=remote_address)
+
+                    if connection.state == ConnectionState.ESTABLISHED and \
+                            connection.host_cid not in self._connections.keys():
+                        self._qlog.info(f"Connected to {remote_address}")
+                        # first successful handshake completion: note connection for future packet delivery
+                        self._connections[connection.host_cid] = connection
+                        handler_nursery.start_soon(handle_connection, connection)
         finally:
             pass  # any server-specific cleanup?
 
@@ -349,6 +372,10 @@ class QuicClient(QuicEndpoint):
           SimpleQuicConnection
         """
         self._check_closed()
+        if client_configuration is None:
+            client_configuration = QuicConfiguration(is_client=True)
+        else:
+            assert client_configuration.is_client
 
         async with trio.open_nursery() as nursery:
             self.start_endpoint(nursery)
@@ -369,6 +396,7 @@ class QuicClient(QuicEndpoint):
                     if await connection.do_handshake(payload, remote_address):
                         assert connection.peer_cid.cid == destination_cid
                     # else: handshake unsuccessful: PTO timer will handle re-transmit of INITIAL (as probe)
+
                     if connection.state == ConnectionState.ESTABLISHED:
                         self._qlog.info(f"Connected to {remote_address}")
                         self._connections[connection.host_cid] = connection  # clients only use 1 connection

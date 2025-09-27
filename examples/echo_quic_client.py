@@ -7,6 +7,7 @@ import sys
 import random
 import trio
 
+from quicly.configuration import QuicConfiguration, update_config
 from quicly.client import open_quic_connection
 from quicly.connection import SimpleQuicConnection
 
@@ -18,34 +19,36 @@ if sys.version_info < (3, 11):
 # - can't be in use by some other program on your computer
 # - must match what we set in our echo server
 PORT = 12345
-N_TRANSMISSIONS = 2
+N_TRANSMISSIONS = 3
 
-async def sender(client_stream, num: int = 0):
-    print("sender: started!")
-    async with client_stream:
-        for pings in range(N_TRANSMISSIONS):
-            message = b'test ' + str(pings).encode() + b' from client ' + str(num).encode()
-            print(f"sender: sending {message!r}")
-            await client_stream.send_all(message)
-            await trio.sleep(float(random.randint(0, 10)) / 10.0)
-
-
-async def receiver(client_stream):
-    print("receiver: started!")
-    # async for data in client_stream:
-    #     print(f"receiver: got data {data!r}")
-    for receipt in range(N_TRANSMISSIONS):
-        data = await client_stream.receive_some()
-        print(f"receiver: got data {data!r}")
-    client_stream.close()
-    print("receiver: connection closed")
-    # raise KeyboardInterrupt
+# async def sender(client_stream, num: int = 0):
+#     print("sender: started!")
+#     async with client_stream:
+#         for pings in range(N_TRANSMISSIONS):
+#             message = b'test ' + str(pings).encode() + b' from client ' + str(num).encode()
+#             print(f"sender: sending {message!r}")
+#             await client_stream.send_all(message)
+#             await trio.sleep(float(random.randint(0, 10)) / 10.0)
+#
+#
+# async def receiver(client_stream):
+#     print("receiver: started!")
+#     # async for data in client_stream:
+#     #     print(f"receiver: got data {data!r}")
+#     for receipt in range(N_TRANSMISSIONS):
+#         data = await client_stream.receive_some()
+#         print(f"receiver: got data {data!r}")
+#     client_stream.close()
+#     print("receiver: connection closed")
+#     # raise KeyboardInterrupt
 
 
 async def parent(num: int = 0):
     host = "127.0.0.1"  # "127.0.0.1" or "0.0.0.0"  # "::1" but never wildcard address "::"
+    client_config = QuicConfiguration(is_client=True)
+    update_config(client_config, transport_parameters={"max_datagram_frame_size": 1200})
 
-    async with open_quic_connection(host, PORT) as client_conn:
+    async with open_quic_connection(host, PORT, configuration=client_config) as client_conn:
         print(f'Starting client {num}')
 
         # async with trio.open_nursery() as nursery:
@@ -56,10 +59,10 @@ async def parent(num: int = 0):
         for pings in range(N_TRANSMISSIONS):
             message = b'test ' + str(pings).encode() + b' from client ' + str(num).encode()
             print(f"sender: sending {message!r}")
-            await client_conn.send_all(message)
-            # await trio.sleep(float(random.randint(0, 10)) / 10.0)
+            await client_conn.send(message)
+            await trio.sleep(float(random.randint(0, 10)) / 10.0)
 
-            data = await client_conn.receive_some()
+            data = await client_conn.receive()
             print(f"receiver: got data {data!r}")
 
     print(f'Stopping client {num}')

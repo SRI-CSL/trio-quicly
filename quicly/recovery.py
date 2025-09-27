@@ -134,7 +134,7 @@ class QuicPacketRecovery:
             if pn == largest_newly_acked and sp.ack_eliciting:
                 largest_sent_time = sp.time_sent
 
-        if largest_acked == largest_newly_acked and is_ack_eliciting:
+        if largest_acked == largest_newly_acked and largest_sent_time is not None:
             latest_rtt = max(now - largest_sent_time, K_GRANULARITY)
 
             # limit ACK delay (in ms) to max_ack_delay (in s)

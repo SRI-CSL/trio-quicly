@@ -9,7 +9,7 @@ import trio
 from typing import *
 import pytest
 
-from quicly.configuration import QuicConfiguration
+from quicly.configuration import QuicConfiguration, TransportParameterType, update_config
 from quicly.endpoint import QuicServer, QuicClient, QuicEndpoint
 from quicly.connection import SimpleQuicConnection, ConnectionState
 from quicly.server import open_quic_servers
@@ -60,16 +60,17 @@ async def test_wildcard_quic_server():
 
 @asynccontextmanager
 async def quic_echo_server(
-    autocancel: bool = True,
-    ipv6: bool = False,
-    delay: int = 0
+        autocancel: bool = True,
+        ipv6: bool = False,
+        delay: int = 0,
+        transport_parameters: dict[TransportParameterType, int | bool] | None = None,
 ) -> AsyncGenerator[tuple[QuicServer, tuple[str, int]], None]:
     with local_endpoint(ipv6=ipv6) as server_endpoint:
         server = cast(QuicServer, server_endpoint)
         await server.socket.bind(server.address)
 
         async with trio.open_nursery() as nursery:
-            async def echo_handler(server_stream: SimpleQuicConnection) -> None:
+            async def echo_handler(server_channel: SimpleQuicConnection) -> None:
                 # print(
                 #     "echo handler started: "
                 #     f"server {server_stream.endpoint.socket.getsockname()!r} and "
@@ -79,47 +80,78 @@ async def quic_echo_server(
                     # print("server starting do_handshake")
                     # await server_stream.do_handshake()
                     # print("server finished do_handshake")
-                    async for packet in server_stream:
-                        # print(f"echoing {packet!r} -> {server_stream.remote_address!r}")
-                        await trio.sleep(delay)
-                        await server_stream.send_all(packet)
+                    # TODO: if DATAGRAM supported, use channel semantics, otherwise stream semantics:
+                    if server_channel.configuration.transport_parameters.max_datagram_frame_size:
+                        async for packet in server_channel:
+                            # print(f"echoing {packet!r} -> {server_stream.remote_address!r}")
+                            await trio.sleep(delay)
+                            await server_channel.send(packet)
+                    else:
+                        async for packet in server_channel.iter_stream_chunks():
+                            # print(f"echoing {packet!r} -> {server_stream.remote_address!r}")
+                            await trio.sleep(delay)
+                            await server_channel.send_all(packet)
                 except trio.BrokenResourceError:  # pragma: no cover
                     print("echo handler channel broken")
 
-            await nursery.start(server.serve, echo_handler, nursery)
+            server_config = QuicConfiguration(is_client=False)
+            update_config(server_config, transport_parameters)
+            await nursery.start(server.serve, echo_handler, nursery, )
 
             yield server, server.socket.getsockname()
 
             if autocancel:
                 nursery.cancel_scope.cancel()
 
-@skipIf(True, "not implemented")
-@parametrize_ipv6
-async def test_smoke(ipv6: bool) -> None:
-    async with (quic_echo_server(True, ipv6=ipv6, delay=1) as (_server_endpoint, address)):
+# TODO: @parametrize_ipv6, also remove = False default below
+async def test_smoke_datagram(ipv6: bool = False) -> None:
+    transport_parameters = {TransportParameterType.MAX_DATAGRAM_FRAME_SIZE : 1200}  # add DATAGRAM support
+    async with quic_echo_server(True, ipv6=ipv6, delay=0,
+                              transport_parameters=transport_parameters) as (_server_endpoint, address):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
+            client_config = QuicConfiguration(is_client=True)
+            update_config(client_config, transport_parameters)
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
-                                      QuicConfiguration(is_client=True)) as client_channel:
+                                      client_config) as client_channel:
                 assert client_channel.state == ConnectionState.ESTABLISHED
                 # exercise back and forth
-                await client_channel.send_all(b"hello")
-                answer = await client_channel.receive_some()
+                await client_channel.send(b"hello")
+                answer = await client_channel.receive()
                 assert answer == b"hello"
-                await client_channel.send_all(b"goodbye")
-                assert await client_channel.receive_some() == b"goodbye"
+                await client_channel.send(b"goodbye")
+                assert await client_channel.receive() == b"goodbye"
 
 # TODO: test_fast_start (sending bytes with INITIAL...)
 
-# TODO: @parametrize_ipv6
-async def test_handshake(ipv6: bool = False) -> None:
-    async with (quic_echo_server(True, ipv6=ipv6, delay=0) as (_server_endpoint, address)):
+# TODO: @parametrize_ipv6, also remove = False default below
+async def test_handshake_datagram(ipv6: bool = False) -> None:
+    transport_parameters = {TransportParameterType.MAX_DATAGRAM_FRAME_SIZE : 1200}  # add DATAGRAM support
+    async with quic_echo_server(True, ipv6=ipv6, delay=0,
+                              transport_parameters=transport_parameters) as (_server_endpoint, address):
+        with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
+            client = cast(QuicClient, client_endpoint)
+            client_config = QuicConfiguration(is_client=True)
+            update_config(client_config, transport_parameters)
+            async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
+                                      client_config) as connection:
+                assert connection.state == ConnectionState.ESTABLISHED
+                await trio.sleep(0.5)  # let handshake finalize for server
+                server = cast(QuicServer, _server_endpoint)
+                assert connection.host_cid in server._connections.keys()
+                server_connection = server._connections[connection.host_cid]
+                assert server_connection.state == ConnectionState.ESTABLISHED
+            # TODO: check cleanly shutdown?
+
+@parametrize_ipv6
+async def test_handshake(ipv6: bool) -> None:
+    async with quic_echo_server(True, ipv6=ipv6, delay=0) as (_server_endpoint, address):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       QuicConfiguration(is_client=True)) as connection:
                 assert connection.state == ConnectionState.ESTABLISHED
-                await trio.sleep(1)  # let handshake finalize for server
+                await trio.sleep(0.5)  # let handshake finalize for server
                 server = cast(QuicServer, _server_endpoint)
                 assert connection.host_cid in server._connections.keys()
                 server_connection = server._connections[connection.host_cid]

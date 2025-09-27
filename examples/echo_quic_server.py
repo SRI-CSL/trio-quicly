@@ -6,6 +6,7 @@ from itertools import count
 import sys
 import trio
 
+from configuration import QuicConfiguration, update_config
 from quicly.connection import SimpleQuicConnection
 from quicly.server import serve_quic
 
@@ -20,15 +21,15 @@ PORT = 12345
 CONNECTION_COUNTER = count()
 
 
-async def echo_handler(server_stream: SimpleQuicConnection) -> None:
+async def echo_handler(server_channel: SimpleQuicConnection) -> None:
     # Assign each connection a unique number to make our debug prints easier
     # to understand when there are multiple simultaneous connections.
     ident = next(CONNECTION_COUNTER)
     print(f"echo for connection {ident}: started")
     try:
-        async for data in server_stream:
+        async for data in server_channel:
             print(f"echo for connection {ident}: received data {data!r}")
-            await server_stream.send_all(data)
+            await server_channel.send(data)
         print(f"echo for connection {ident}: connection closed")
     # FIXME: add discussion of (Base)ExceptionGroup to the tutorial, and use
     # exceptiongroup.catch() here. (Not important in this case, but important
@@ -40,7 +41,9 @@ async def echo_handler(server_stream: SimpleQuicConnection) -> None:
         print(f"echo {ident}: crashed: {exc!r}")
 
 async def main():
-    await serve_quic(echo_handler, PORT, )  #host="::")  # or or "0.0.0.0"
+    server_config = QuicConfiguration(is_client=False)
+    update_config(server_config, transport_parameters={"max_datagram_frame_size": 1200})
+    await serve_quic(echo_handler, PORT, configuration=server_config)  #host="::")  # or or "0.0.0.0"
 
 # We could also just write 'trio.run(trio.serve_tcp, echo_server, PORT)', but real
 # programs almost always end up doing other stuff too and then we'd have to go

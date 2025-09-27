@@ -13,7 +13,7 @@ from .exceptions import QuicProtocolViolation
 from .frame import encode_var_length_int, decode_var_length_int, QuicFrame, parse_all_quic_frames, \
     NON_ACK_ELICITING_FRAME_TYPES, QuicFrameType
 
-MAX_UDP_PACKET_SIZE = 65527
+MAX_UDP_PACKET_SIZE = 65527  # TODO: Linda: move into configuration.py?!? or utils.py? or endpoint.py?
 
 # QUIC Packet : QUIC Endpoints communicate by exchanging Packets. QUIC Packets are complete processable units of QUIC
 # that can be encapsulated in a UDP datagram. One or more QUIC Packets can be encapsulated in a single UDP datagram,
@@ -295,7 +295,6 @@ def decode_udp_packet(payload: bytes, destination_cid: bytes = None):
         # Try to decode one packet from current position
         packet, consumed = decode_quic_packet(payload[offset:], destination_cid=destination_cid)
         if consumed <= 0 or packet is None:
-            # TODO: log error message somewhere or silently drop?
             break  # stop parsing
 
         yield packet

@@ -9,6 +9,11 @@ from typing import *
 SMALLEST_MAX_DATAGRAM_SIZE = 1200
 
 # === QUIC-LY Transport Parameters (CONFIG / CONFIG-ACK) =====================
+# TODO: Linda: make sure that overriding max_datagram_frame_size > 0 needs to be also > MAX_UDP_PAYLOAD_SIZE!
+#  For most uses of DATAGRAM frames,
+#  it is RECOMMENDED to send a value of 65535 in the max_datagram_frame_size transport parameter to indicate that
+#  this endpoint will accept any DATAGRAM frame that fits inside a QUIC packet.
+
 class TransportParameterType(IntEnum):
     INITIAL_MAX_DATA             = 0x01  # bytes
     INITIAL_MAX_STREAM_DATA_BIDI = 0x02  # bytes
@@ -19,6 +24,7 @@ class TransportParameterType(IntEnum):
     MAX_ACK_DELAY_MS             = 0x07  # ms
     DISABLE_ACTIVE_MIGRATION     = 0x08  # flag (VALUE_LEN=0 => true)
     INITIAL_PADDING_TARGET       = 0x09  # bytes
+    MAX_DATAGRAM_FRAME_SIZE      = 0x20  # bytes
 
     def __str__(self):
         return self.name.lower()
@@ -33,6 +39,7 @@ PARAM_SCHEMA: dict[TransportParameterType, tuple[str, Callable[[int|bool], int|b
     TransportParameterType.MAX_ACK_DELAY_MS:             ("max_ack_delay_ms", int),
     TransportParameterType.DISABLE_ACTIVE_MIGRATION:     ("disable_active_migration", lambda v: bool(v)),
     TransportParameterType.INITIAL_PADDING_TARGET:       ("initial_padding_target", int),
+    TransportParameterType.MAX_DATAGRAM_FRAME_SIZE:      ("max_datagram_frame_size", int),
 }
 
 # Defaults per QUIC-LY spec (recommended when CONFIG/CONFIG-ACK empty)
@@ -46,6 +53,7 @@ QUICLY_DEFAULTS: Dict[TransportParameterType, int | bool] = {
     TransportParameterType.MAX_ACK_DELAY_MS:                    25,
     TransportParameterType.DISABLE_ACTIVE_MIGRATION:         False,
     TransportParameterType.INITIAL_PADDING_TARGET:            1200,
+    TransportParameterType.MAX_DATAGRAM_FRAME_SIZE:              0,
 }
 
 @dataclass
@@ -60,6 +68,7 @@ class QuicLyTransportParameters:
     max_ack_delay_ms: int             = QUICLY_DEFAULTS[TransportParameterType.MAX_ACK_DELAY_MS]             # ms
     disable_active_migration: bool    = QUICLY_DEFAULTS[TransportParameterType.DISABLE_ACTIVE_MIGRATION]     # flag
     initial_padding_target: int       = QUICLY_DEFAULTS[TransportParameterType.INITIAL_PADDING_TARGET]       # bytes
+    max_datagram_frame_size: int      = QUICLY_DEFAULTS[TransportParameterType.MAX_DATAGRAM_FRAME_SIZE]      # bytes
 
     def as_dict(self, include_defaults: bool = False) -> dict[str, int|bool]:
         return {f: getattr(self, f) for pid, (f, _) in PARAM_SCHEMA.items()
@@ -81,13 +90,15 @@ class QuicLyTransportParameters:
         :param new_params: Dictionary of transport parameter names and their new values.
         :return: True iff at least one value changed.
         """
+        if new_params is None:
+            return False
         changed = False
         for key, raw in new_params.items():
             # Allow enum keys or field-name strings
-            name = key.name if hasattr(key, "name") else str(key)
+            name = str.lower(key.name) if hasattr(key, "name") else str(key)
 
             if not hasattr(self, name):
-                continue  # ignore unkown keys
+                continue  # ignore unknown keys
 
             current = getattr(self, name)
             # Normalize the incoming value to the attribute's type
@@ -138,3 +149,9 @@ class QuicConfiguration:
     """
     The maximum number of ACK intervals to retain after sending an ACK Frame.
     """
+
+def update_config(config: QuicConfiguration,
+                  transport_parameters: dict[TransportParameterType | str | int, int | bool]):
+    tps = config.transport_parameters
+    if tps.update(transport_parameters):
+        config.transport_parameters = tps
