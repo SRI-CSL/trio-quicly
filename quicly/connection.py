@@ -222,17 +222,15 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         async with self.on_tx_recv:
             async for pt, payload in self.on_tx_recv:
                 if pt == QuicPacketType.INITIAL:
-                    qpkt = create_quic_packet(pt,
-                                              destination_cid=self.peer_cid.cid,
-                                              source_cid=self.host_cid,
-                                              packet_number=self._get_and_incr_pn(),
-                                              payload=payload, )
+                    qpkt = self._build_quic_packet(pt,
+                                                   destination_cid=self.peer_cid.cid,
+                                                   source_cid=self.host_cid,
+                                                   payload=payload, )
                 else:
                     assert self.peer_cid.cid, "sending ONE_RTT before destination CID known"
-                    qpkt = create_quic_packet(pt,
-                                              destination_cid=self.peer_cid.cid,
-                                              packet_number=self._get_and_incr_pn(),
-                                              payload=payload, )
+                    qpkt = self._build_quic_packet(pt,
+                                                   destination_cid=self.peer_cid.cid,
+                                                   payload=payload, )
                 await self.on_tx(qpkt)
 
     def start_background(self, nursery: trio.Nursery) -> None:
@@ -247,10 +245,9 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             close_frame = ConnectionCloseFrame(QuicErrorCode.APPLICATION_ERROR,
                                                reason=b'aclose()')  # APP_CLOSE does not include frame type!
             await self.on_tx(
-                create_quic_packet(QuicPacketType.ONE_RTT,
-                                   self.peer_cid.cid,
-                                   packet_number=self._get_and_incr_pn(),
-                                   payload=[QuicFrame(QuicFrameType.APPLICATION_CLOSE, content=close_frame)]))
+                self._build_quic_packet(QuicPacketType.ONE_RTT,
+                                        self.peer_cid.cid,
+                                        payload=[QuicFrame(QuicFrameType.APPLICATION_CLOSE, content=close_frame)]))
         await self.aclose()
 
     def enter_draining(self) -> None:
@@ -260,11 +257,14 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         self._idle_timer.cancel()
         self.pto_timer.cancel()
 
-    # TODO: consider integration with `create_quic_packet` (move from packet.py) to make sure to ONLY ever increase PN when calling this?
-    def _get_and_incr_pn(self) -> int:
-        next_pn = self._next_pn_tx
-        self._next_pn_tx = next_pn + 1
-        return next_pn
+    # TODO: consider integration with `self._build_quic_packet` (move from packet.py) to make sure to ONLY ever increase PN when calling this?
+    def _build_quic_packet(self, packet_type: QuicPacketType, destination_cid: bytes, **kwargs) -> QuicPacket:
+        def _get_and_incr_pn() -> int:
+            next_pn = self._next_pn_tx
+            self._next_pn_tx = next_pn + 1
+            return next_pn
+        
+        return create_quic_packet(packet_type, destination_cid, packet_number=_get_and_incr_pn(), **kwargs)
 
     # def _update_rtt(self, space: PNSpace, latest: float, ack_delay: float) -> None:
     #     rs = self._rtt_state[space]
@@ -326,11 +326,10 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
     def init_handshake(self) -> QuicPacket:
         assert self._is_client, "init_handshake() must only be called by client"
-        return create_quic_packet(QuicPacketType.INITIAL,
-                                  destination_cid=b'',  # don't need random bits in QUIC-LY!
-                                  source_cid=self.host_cid,
-                                  packet_number=self._get_and_incr_pn(),
-                                  payload=[self._get_config_frame()])
+        return self._build_quic_packet(QuicPacketType.INITIAL,
+                                       destination_cid=b'',  # don't need random bits in QUIC-LY!
+                                       source_cid=self.host_cid,
+                                       payload=[self._get_config_frame()])
 
     @staticmethod
     def _get_initial_pkt(payload) -> LongHeaderPacket:
@@ -679,11 +678,10 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             # TODO: PROTOCOL_VIOLATION?
             self._qlog.warn("DATAGRAM size exceeds negotiated frame size", size_max=max_frame_size - 1)
             raise RuntimeError("DATAGRAM size exceeds negotiated frame size")
-        qpkt = create_quic_packet(QuicPacketType.ONE_RTT,
-                                  destination_cid=self.peer_cid.cid,
-                                  packet_number=self._get_and_incr_pn(),
-                                  payload=[QuicFrame(
-                                      QuicFrameType.DATAGRAM, content=DatagramFrame(datagram_data=value))])
+        qpkt = self._build_quic_packet(QuicPacketType.ONE_RTT,
+                                       destination_cid=self.peer_cid.cid,
+                                       payload=[QuicFrame(
+                                           QuicFrameType.DATAGRAM, content=DatagramFrame(datagram_data=value))])
         await self.on_tx(qpkt)
 
     async def receive(self) -> bytes:
