@@ -265,6 +265,17 @@ QUIC-LY uses NEW_CONNECTION_ID and RETIRE_CONNECTION_ID as in {{RFC9000}}. PATH_
 
 QUIC-LY uses connection- and stream-level flow control as in {{RFC9000}} with limits established by CONFIG/CONFIG-ACK or defaults. Limits MAY be raised during the connection using MAX_DATA and MAX_STREAM_DATA.
 
+# DATAGRAM Support
+
+QUIC-LY supports sending data in DATAGRAM frames according to {{RFC9221}} if the respective transport parameter is set 
+to something larger than zero.  Endpoints that support unreliable messages advertise `max_datagram_frame_size > 0`. 
+Endpoints MUST NOT send DATAGRAM frames to a peer that did not advertise support.
+
+DATAGRAM frames are ack-eliciting and congestion-controlled. They are not retransmitted by the transport and are not 
+subject to stream flow control.
+
+Endpoints MUST discard DATAGRAM frames that exceed their configured maximum size; this is not a connection error.
+
 # Loss Detection and Recovery {#recovery}
 
 QUIC-LY adopts the algorithms and timers of {{RFC9002}}. ACK generation, ACK delay, and probe timeouts follow QUIC norms, minus cryptographic key phases. 
