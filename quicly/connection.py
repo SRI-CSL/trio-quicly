@@ -12,7 +12,7 @@ from typing import *
 from .acks import PacketNumberSpace, SentPacket
 from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE, PARAM_SCHEMA
 from .exceptions import QuicErrorCode
-from .frame import decode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter, \
+from .frame import decode_var_length_int, encode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter, \
     ConnectionCloseFrame, ACKFrame, NON_ACK_ELICITING_FRAME_TYPES, DatagramFrame
 from .logger import make_qlog
 from .packet import create_quic_packet, is_long_header, QuicPacketType, LongHeaderPacket, \
@@ -662,6 +662,11 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         return self.configuration.transport_parameters.max_datagram_frame_size
 
     async def send(self, value: bytes) -> None:
+        """
+        Implementation of `trio.abc.Channel[bytes].send()` to send DATAGRAM or DATAGRAM_WITH_LENGTH frames.
+        This method checks for PROTOCOL_VIOLATION before sending.  #TODO: exception or log warning only?
+        :param value: data to be sent inside datagram frame
+        """
         if self.state != ConnectionState.ESTABLISHED:
             # TODO: PROTOCOL_VIOLATION?
             self._qlog.warn("Trying to send DATAGRAM on non-established connection", current_state=self.state)
@@ -673,18 +678,27 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             self._qlog.warn("DATAGRAM sending not supported by peer")
             raise RuntimeError("DATAGRAM sending not supported by peer")
 
-        # TODO: we don't fragment but require that the application is sending chunks of < max_frame_size - 1 (type)?
-        if len(value) >= max_frame_size:
+        # TODO: we don't fragment but require that the application is sending
+        #  chunks of < max_frame_size - 1 - len(length_varint)
+        encoded_length = encode_var_length_int(len(value))
+        if len(encoded_length) + len(value) >= max_frame_size:
             # TODO: PROTOCOL_VIOLATION?
-            self._qlog.warn("DATAGRAM size exceeds negotiated frame size", size_max=max_frame_size - 1)
-            raise RuntimeError("DATAGRAM size exceeds negotiated frame size")
+            self._qlog.warn("DATAGRAM_WITH_LENGTH size exceeds negotiated frame size",
+                            size_max=max_frame_size, len_frame=1 + len(encoded_length) + len(value))
+            raise RuntimeError("DATAGRAM_WITH_LENGTH size exceeds negotiated frame size")
         qpkt = self._build_quic_packet(QuicPacketType.ONE_RTT,
                                        destination_cid=self.peer_cid.cid,
                                        payload=[QuicFrame(
-                                           QuicFrameType.DATAGRAM, content=DatagramFrame(datagram_data=value))])
+                                           QuicFrameType.DATAGRAM_WITH_LENGTH,
+                                           content=DatagramFrame(datagram_data=value, with_length=True))])
         await self.on_tx(qpkt)
 
     async def receive(self) -> bytes:
+        """
+        Implementation of `trio.abc.Channel[bytes].receive()` to receive DATAGRAM or DATAGRAM_WITH_LENGTH frames.
+        This method checks for PROTOCOL_VIOLATION.  #TODO: exception or log warning only?
+        :returns: data to received from inside datagram frame
+        """
         if self._closed:
             raise trio.ClosedResourceError("connection was already closed")
 
@@ -767,9 +781,9 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         if max_bytes < 1:
             raise ValueError("max_bytes must be >= 1")
         try:
-            # TODO: implement receive_some() via STREAM frames
-            packet = await self._stream_q.r.receive()
-            return packet[:max_bytes]
+            # TODO: implement STREAM frame handling to submit to self._stream_q.s.send(data)
+            data = await self._stream_q.r.receive()
+            return data[:max_bytes]
         except (trio.EndOfChannel, trio.ClosedResourceError):
             # we catch ClosedResource here as it comes from the Queue being closed
             return b""

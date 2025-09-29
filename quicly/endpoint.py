@@ -302,7 +302,9 @@ class QuicServer(QuicEndpoint):
                 async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
                     connection = self._new_connections.get(destination_cid, None)
                     if connection is None:
-                        self._qlog.debug(f"~~~ Starting NEW connection CID={hexdump(destination_cid)}")
+                        self._qlog.debug(f"Starting NEW connection CID={hexdump(destination_cid)}",
+                                         dcid=hexdump(destination_cid),
+                                         remote_addr=remote_address)
                         connection = SimpleQuicConnection(self._send_q.s.clone(),
                                                           remote_address,
                                                           self.connection_id_length,
@@ -317,16 +319,17 @@ class QuicServer(QuicEndpoint):
                         if connection.state == ConnectionState.ACCEPT:
                             # switched from LISTEN to ACCEPT: change key for _new_connections to host_cid!
                             self._new_connections[connection.host_cid] = connection
-                    elif connection.state == ConnectionState.ACCEPT:
-                        self._qlog.debug(f"~~~ Serving accepted NEW connection CID={hexdump(destination_cid)}")
+                    elif connection.state in [ConnectionState.ACCEPT, ConnectionState.ESTABLISHED]:
+                        self._qlog.debug(f"Serving accepted or established NEW connection "
+                                         f"CID={hexdump(destination_cid)}",
+                                         dcid=hexdump(destination_cid),
+                                         remote_addr=remote_address)
                         await connection.on_rx(list(decode_udp_packet(payload, destination_cid)), remote_address)
-                    elif connection.state == ConnectionState.ESTABLISHED:
-                        # should not happen?
-                        self._qlog.warn(f"~~~ Should not serve established NEW connection here...",
-                                        dcid=hexdump(destination_cid), remote_addr=remote_address)
                     else:
-                        self._qlog.warn(f"Cannot serve UDP payload in current state",
-                                        current_state=connection.state, dcid=hexdump(destination_cid),
+                        self._qlog.warn(f"Cannot serve UDP payload from NEW connection CID={hexdump(destination_cid)}"
+                                        f"in current state",
+                                        current_state=connection.state,
+                                        dcid=hexdump(destination_cid),
                                         remote_addr=remote_address)
 
                     if connection.state == ConnectionState.ESTABLISHED and \

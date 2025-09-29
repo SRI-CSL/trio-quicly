@@ -141,6 +141,9 @@ async def test_handshake_datagram(ipv6: bool = False) -> None:
                 assert connection.host_cid in server._connections.keys()
                 server_connection = server._connections[connection.host_cid]
                 assert server_connection.state == ConnectionState.ESTABLISHED
+            await trio.sleep(0.5)  # let closing() commence?
+            print(f"client state: {connection.state}")
+
             # TODO: check cleanly shutdown?
 
 @parametrize_ipv6

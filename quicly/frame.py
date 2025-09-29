@@ -665,10 +665,10 @@ class ConnectionCloseFrame(FrameSubtype):
 @dataclass
 class DatagramFrame(FrameSubtype):
     datagram_data: bytes
-    length: Optional[int] = None
+    with_length: bool = False
 
     def encode(self) -> bytes:
-        return (encode_var_length_int(self.length) if self.length is not None else b'') + self.datagram_data
+        return (encode_var_length_int(len(self.datagram_data)) if self.with_length else b'') + self.datagram_data
 
     @classmethod
     def decode(cls, data: bytes, frame_type: int = QuicFrameType.DATAGRAM) -> tuple["DatagramFrame", int]:
@@ -676,7 +676,7 @@ class DatagramFrame(FrameSubtype):
             return cls(datagram_data=data), len(data)
         # must be of type DATAGRAM_WITH_LENGTH:
         length, offset = decode_var_length_int(data)
-        return cls(datagram_data=data[offset:offset + length], length=length), offset + length
+        return cls(datagram_data=data[offset:offset + length], with_length=True), offset + length
 
 
 @dataclass

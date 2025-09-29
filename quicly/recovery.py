@@ -224,22 +224,22 @@ class QuicPacketRecovery:
     def _get_loss_space(self) -> PacketNumberSpace | None:
         return None
 
-    def _log_metrics_updated(self, log_rtt=False) -> None:
-        data: Dict[str, Any] = self._cc.get_log_data()
-
-        if log_rtt:
-            data.update(
-                {
-                    "latest_rtt": self._quic_logger.encode_time(self._rtt_latest),
-                    "min_rtt": self._quic_logger.encode_time(self._rtt_min),
-                    "smoothed_rtt": self._quic_logger.encode_time(self._rtt_smoothed),
-                    "rtt_variance": self._quic_logger.encode_time(self._rtt_variance),
-                }
-            )
-
-        self._quic_logger.log_event(
-            category="recovery", event="metrics_updated", data=data
-        )
+    # def _log_metrics_updated(self, log_rtt=False) -> None:
+    #     data: Dict[str, Any] = self._cc.get_log_data()
+    #
+    #     if log_rtt:
+    #         data.update(
+    #             {
+    #                 "latest_rtt": self._quic_logger.encode_time(self._rtt_latest),
+    #                 "min_rtt": self._quic_logger.encode_time(self._rtt_min),
+    #                 "smoothed_rtt": self._quic_logger.encode_time(self._rtt_smoothed),
+    #                 "rtt_variance": self._quic_logger.encode_time(self._rtt_variance),
+    #             }
+    #         )
+    #
+    #     self._quic_logger.log_event(
+    #         category="recovery", event="metrics_updated", data=data
+    #     )
 
     def _on_packets_lost(self, *, now: float, packets: Iterable[SentPacket]) -> None:
         lost_packets_cc = []
@@ -269,10 +269,11 @@ class QuicPacketRecovery:
 
         # inform congestion controller
         if lost_packets_cc:
-            self._cc.on_packets_lost(now=now, packets=lost_packets_cc)
-            self._pacer.update_rate(
-                congestion_window=self._cc.congestion_window,
-                smoothed_rtt=self._rtt_smoothed,
-            )
-            if self._quic_logger is not None:
-                self._log_metrics_updated()
+            pass
+            # self._cc.on_packets_lost(now=now, packets=lost_packets_cc)
+            # self._pacer.update_rate(
+            #     congestion_window=self._cc.congestion_window,
+            #     smoothed_rtt=self._rtt_smoothed,
+            # )
+            # if self._quic_logger is not None:
+            #     self._log_metrics_updated()

@@ -6,10 +6,11 @@ import random
 from copy import deepcopy
 
 from quicly.exceptions import QuicConnectionError
-from quicly.frame import encode_var_length_int, decode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, ACKRange, \
+from quicly.frame import encode_var_length_int, decode_var_length_int, QuicFrame, QuicFrameType, ACKFrame, ECNCounts, \
+    ACKRange, \
     StreamFrame, MaxDataFrame, MaxStreamData, StopSendingFrame, MaxStreamsBidiFrame, MaxStreamsUniFrame, \
     DataBlockedFrame, StreamsBlockedBidiFrame, StreamsBlockedUniFrame, RetireConnectionIDFrame, StreamDataBlockedFrame, \
-    ConnectionCloseFrame, NewConnectionIDFrame, parse_all_quic_frames
+    ConnectionCloseFrame, NewConnectionIDFrame, parse_all_quic_frames, DatagramFrame
 
 
 def test_var_int_encoding():
@@ -515,3 +516,56 @@ def test_iterating_frames():
     assert len(frames) == 3
     assert frames[1].frame_type == QuicFrameType.MAX_DATA
     assert consumed == 4
+
+def test_datagram_no_length_roundtrip_simple():
+    payload = b'hello world'
+    qf = QuicFrame(QuicFrameType.DATAGRAM, DatagramFrame(datagram_data=payload))
+    wire = qf.encode()
+
+    decoded, used = QuicFrame.decode(wire)
+    assert used == len(wire)
+    assert decoded.frame_type == QuicFrameType.DATAGRAM
+    assert isinstance(decoded.content, DatagramFrame)
+    assert decoded.content.with_length is False
+    assert decoded.content.datagram_data == payload
+
+def test_datagram_with_length_roundtrip_simple():
+    payload = b'abc123'
+    qf = QuicFrame(QuicFrameType.DATAGRAM_WITH_LENGTH, DatagramFrame(datagram_data=payload, with_length=True))
+    wire = qf.encode()
+
+    decoded, used = QuicFrame.decode(wire)
+    assert used == len(wire)
+    assert decoded.frame_type == QuicFrameType.DATAGRAM_WITH_LENGTH
+    assert isinstance(decoded.content, DatagramFrame)
+    assert decoded.content.with_length is True
+    assert decoded.content.datagram_data == payload
+
+def test_datagram_no_length_consumes_rest_of_packet():
+    # Build: [DATAGRAM(no-length, b'xyz')] + [PADDING] → PADDING is consumed into datagram payload
+    dgram = QuicFrame(QuicFrameType.DATAGRAM, DatagramFrame(datagram_data=b'xyz'))
+    padding = QuicFrame(QuicFrameType.PADDING)
+    wire = dgram.encode() + padding.encode()
+
+    frames, consumed = parse_all_quic_frames(wire)
+    assert consumed == len(wire)
+    assert len(frames) == 1                            # no separate PADDING frame parsed
+    d = frames[0]
+    assert d.frame_type == QuicFrameType.DATAGRAM
+    assert isinstance(d.content, DatagramFrame)
+    # payload includes the trailing PADDING type byte (since no-length consumes rest)
+    assert d.content.datagram_data.endswith(padding.encode())
+
+def test_datagram_with_length_allows_following_frames():
+    # Build: [DATAGRAM_WITH_LENGTH(len=3,'xyz')] + [PADDING]
+    dgram = QuicFrame(QuicFrameType.DATAGRAM_WITH_LENGTH, DatagramFrame(datagram_data=b'xyz', with_length=True))
+    padding = QuicFrame(QuicFrameType.PADDING)
+    wire = dgram.encode() + padding.encode()
+
+    frames, consumed = parse_all_quic_frames(wire)
+    assert consumed == len(wire)
+    assert len(frames) == 2
+    assert frames[0].frame_type == QuicFrameType.DATAGRAM_WITH_LENGTH
+    assert isinstance(frames[0].content, DatagramFrame)
+    assert frames[0].content.datagram_data == b'xyz'
+    assert frames[1].frame_type == QuicFrameType.PADDING
