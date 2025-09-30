@@ -1,0 +1,7 @@
+# configuration of QUIC-LY endpoints and runtime
+
+[logging]
+level = "INFO"
+
+[endpoint]
+ipv6 = false

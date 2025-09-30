@@ -119,28 +119,32 @@ After receiving this response, the connection is established and the values in t
 
 ## Transport Parameters (TLVs) {#transport-parameters-tlvs}
 
-QUIC-LY defines the following minimal set. Unknown `PARAM_ID`s MUST be ignored (skipped) by the receiver.
+QUIC-LY defines the following minimal set. Unknown `PARAM_ID`s MUST be ignored (skipped) by the receiver. 
+QUIC-LY uses the following subset of QUIC transport parameters and adds optional datagram support and padding targets.
 
-| ID   | Name                         | Type   | Units |
-|:-----|:-----------------------------|:-------|:------|
-| 0x01 | initial_max_data             | varint | bytes |
-| 0x02 | initial_max_stream_data_bidi | varint | bytes |
-| 0x03 | initial_max_streams_bidi     | varint | count |
-| 0x04 | max_udp_payload_size         | varint | bytes |
-| 0x05 | idle_timeout_ms              | varint | ms    |
-| 0x06 | ack_delay_exponent           | varint | —     |
-| 0x07 | max_ack_delay_ms             | varint | ms    |
-| 0x08 | disable_active_migration     | flag   | —     |
-| 0x09 | initial_padding_target       | varint | bytes |
+| ID    | Name                                   | Type   | Units | Default (QUIC)            | QUIC |
+|:------|:---------------------------------------|:-------|:------|:--------------------------|:-----|
+| 0x01  | max_idle_timeout                       | varint | ms    | 0 (disabled if 0/absent)  | yes  |
+| 0x03  | max_udp_payload_size                   | varint | bytes | 65527 (MUST be ≥ 1200)    | yes  |
+| 0x04  | initial_max_data                       | varint | bytes | 0                         | yes  |
+| 0x05  | initial_max_stream_data_bidi_local     | varint | bytes | 0                         | yes  |
+| 0x06  | initial_max_stream_data_bidi_remote    | varint | bytes | 0                         | yes  |
+| 0x07  | initial_max_stream_data_uni            | varint | bytes | 0                         | yes  |
+| 0x08  | initial_max_streams_bidi               | varint | count | 0                         | yes  |
+| 0x09  | initial_max_streams_uni                | varint | count | 0                         | yes  |
+| 0x0a  | ack_delay_exponent                     | varint | —     | 3                         | yes  |
+| 0x0b  | max_ack_delay                          | varint | ms    | 25                        | yes  |
+| 0x0c  | disable_active_migration               | flag   | —     | absent ⇒ false            | yes  |
+| 0x0e  | active_connection_id_limit             | varint | count | 2 (MUST be ≥ 2)           | yes  |
+| 0x20  | max_datagram_frame_size                | varint | bytes | 0 (absent ⇒ no support)   | RFC9221 |
+| 0x173 | initial_padding_target (QUIC-LY only)  | varint | bytes | 1200                      | no   |
 
-**RECOMMENDED defaults** (if CONFIG/CONFIG-ACK are omitted):
+If present, transport parameters that set initial per-stream flow control limits (initial_max_stream_data_bidi_local, 
+initial_max_stream_data_bidi_remote, and initial_max_stream_data_uni) are equivalent to sending a MAX_STREAM_DATA 
+frame on every stream of the corresponding type immediately after opening. If the transport parameter is absent, 
+streams of that type start with a flow control limit of 0.
 
-~~~
-initial_max_data = 1,048,576; initial_max_stream_data_bidi = 262,144;
-initial_max_streams_bidi = 8; max_udp_payload_size = 1350;
-idle_timeout_ms = 30000; ack_delay_exponent = 3; max_ack_delay_ms = 25;
-initial_padding_target = 1200; disable_active_migration = absent (false).
-~~~
+In QUIC-LY, if CONFIG and CONFIG_ACK frames are empty, apply the defaults from the table above.
 
 ### TLV Encoding Details and Example
 

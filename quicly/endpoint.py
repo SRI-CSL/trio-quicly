@@ -391,7 +391,7 @@ class QuicClient(QuicEndpoint):
                                               configuration=client_configuration)
             connection.start_background(nursery)
 
-            with trio.move_on_after(connection.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND) \
+            with trio.move_on_after(connection.configuration.transport_local.idle_timeout_ms * K_MILLI_SECOND) \
                     as cancel_scope:
                 initial_pkt = connection.init_handshake()
                 await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed

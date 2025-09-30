@@ -1,0 +1,5 @@
+# testing overriding TPs from file
+
+[transport]
+max_idle_timeout_ms = 30000  # 30s
+max_datagram_frame_size = 1200  # enable DATAGRAM support

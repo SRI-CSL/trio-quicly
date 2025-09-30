@@ -10,7 +10,7 @@ from types import TracebackType
 from typing import *
 
 from .acks import PacketNumberSpace, SentPacket
-from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE, PARAM_SCHEMA
+from .configuration import QuicConfiguration, SMALLEST_MAX_DATAGRAM_SIZE
 from .exceptions import QuicErrorCode
 from .frame import decode_var_length_int, encode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter, \
     ConnectionCloseFrame, ACKFrame, NON_ACK_ELICITING_FRAME_TYPES, DatagramFrame
@@ -320,7 +320,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             self.pto_timer.set_timer_at(loss_detection_time)
 
     def _get_config_frame(self) -> QuicFrame:
-        ts = [TransportParameter(*tp) for tp in self.configuration.transport_parameters.as_list(exclude_defaults=True)]
+        ts = [TransportParameter(*tp) for tp in self.configuration.transport_local.as_list(exclude_defaults=True)]
         return QuicFrame(QuicFrameType.CONFIG if self._is_client else QuicFrameType.CONFIG_ACK,
                          content=ConfigFrame(ts))
 
@@ -437,7 +437,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             if self._pn_space.last_successful_rx is not None:
                 # restart idle timeout if sending the first ack-eliciting packet since the last successful RX
                 self._idle_timer.set_timer_after(max(
-                    self.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND,
+                    self.configuration.transport_local.idle_timeout_ms * K_MILLI_SECOND,
                     3 * self._loss.get_probe_timeout()))
                 self._pn_space.last_successful_rx = None
 
@@ -452,7 +452,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         if qpkt.packet_type == QuicPacketType.INITIAL and self._is_client:
             # Any datagram sent by the client that contains an Initial packet must be padded to a length of
             # INITIAL_PADDING_TARGET bytes. This library does it by appending nul bytes to the datagram.
-            data = data.ljust(self.configuration.transport_parameters.initial_padding_target, b'\x00')
+            data = data.ljust(self.configuration.transport_local.initial_padding_target, b'\x00')
         await self._send_bytes(data, qpkt.is_closing())
 
     def send_probe(self) -> None:
@@ -536,7 +536,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
     def _handle_config(self, config_frame) -> bool:
         # TODO: what are the semantics of receiving peer parameters? Should they always override??
         peer_params = {PARAM_SCHEMA[tp.param_id][0]: tp.value for tp in config_frame.transport_parameters}
-        return self.configuration.transport_parameters.update(peer_params)
+        return self.configuration.transport_local.update(peer_params)
 
     async def on_rx(self, quic_packets: List[QuicPacket], remote_addr: NetworkAddress = None) -> None:
         """
@@ -607,9 +607,9 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
                     # receives a DATAGRAM frame that is larger than the value it sent in its max_datagram_frame_size transport
                     # parameter TODO: MUST terminate the connection with an error of type PROTOCOL_VIOLATION.
                     df = cast(DatagramFrame, qf.content)
-                    if len(df.datagram_data) > self.configuration.transport_parameters.max_datagram_frame_size:
+                    if len(df.datagram_data) > self.configuration.transport_local.max_datagram_frame_size:
                         self._qlog.warn(f"Received DATAGRAM too big - PROTOCOL_VIOLATION!",
-                                        max_size=self.configuration.transport_parameters.max_datagram_frame_size)
+                                        max_size=self.configuration.transport_local.max_datagram_frame_size)
                         await self.enter_closing()
                         return
                     await self._datagram_q.s.send(df.datagram_data)
@@ -625,13 +625,13 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
             # restart idle timer to configured timeout but at least 3x the current PTO timeout
             self._idle_timer.set_timer_after(
-                max(self.configuration.transport_parameters.idle_timeout_ms * K_MILLI_SECOND,
+                max(self.configuration.transport_local.idle_timeout_ms * K_MILLI_SECOND,
                     3 * self._loss.get_probe_timeout()))
             # use the following to decide if we do the first TX of an ack-liciting packet after last successful RX:
             self._pn_space.last_successful_rx = trio.current_time()
 
             if ack_eliciting:
-                max_ack_delay = self.configuration.transport_parameters.max_ack_delay_ms * K_MILLI_SECOND
+                max_ack_delay = self.configuration.transport_local.max_ack_delay_ms * K_MILLI_SECOND
                 # An endpoint SHOULD generate and send an ACK frame without delay when it receives an ack-eliciting
                 # packet either: (1) when the received packet has a packet number less than another ack-eliciting
                 # packet that has been received, or (2) when the packet has a packet number larger than the
@@ -659,7 +659,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         if self.state != ConnectionState.ESTABLISHED:
             self._qlog.warn("Peer transport parameters not negotiated", current_state=self.state)
             raise RuntimeWarning("Peer transport parameters not negotiated")
-        return self.configuration.transport_parameters.max_datagram_frame_size
+        return self.configuration.transport_local.max_datagram_frame_size
 
     async def send(self, value: bytes) -> None:
         """
@@ -672,7 +672,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             self._qlog.warn("Trying to send DATAGRAM on non-established connection", current_state=self.state)
             raise ConnectionError(f"Connection not established for sending DATAGRAMs")
 
-        max_frame_size = self.configuration.transport_parameters.max_datagram_frame_size
+        max_frame_size = self.configuration.transport_local.max_datagram_frame_size
         if max_frame_size <= 0:
             # TODO: PROTOCOL_VIOLATION?
             self._qlog.warn("DATAGRAM sending not supported by peer")
@@ -704,7 +704,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
         # An endpoint that receives a DATAGRAM frame when it has not indicated support via the transport parameter
         # TODO: MUST terminate the connection with an error of type PROTOCOL_VIOLATION.
-        max_frame_size = self.configuration.transport_parameters.max_datagram_frame_size
+        max_frame_size = self.configuration.transport_local.max_datagram_frame_size
         if max_frame_size <= 0:
             # TODO: PROTOCOL_VIOLATION?
             self._qlog.warn("DATAGRAM receiving not supported")

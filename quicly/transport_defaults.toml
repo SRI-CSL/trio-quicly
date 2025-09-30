@@ -1,0 +1,19 @@
+# transport_defaults.toml
+
+# QUIC(-LY) transport parameters (local defaults)
+[transport]
+# QUIC defaults (plus QUIC-LY initial_padding_target), aligned with the spec table
+max_idle_timeout_ms = 0               # 0 = disabled
+max_udp_payload_size = 65527          # MUST be >= 1200
+initial_max_data = 0
+initial_max_stream_data_bidi_local = 0
+initial_max_stream_data_bidi_remote = 0
+initial_max_stream_data_uni = 0
+initial_max_streams_bidi = 0
+initial_max_streams_uni = 0
+ack_delay_exponent = 3
+max_ack_delay_ms = 25
+disable_active_migration = false      # QUIC default = absent ⇒ false
+active_connection_id_limit = 2        # MUST be >= 2
+max_datagram_frame_size = 0           # 0/absent => no DATAGRAM support
+initial_padding_target = 1200         # QUIC-LY specific

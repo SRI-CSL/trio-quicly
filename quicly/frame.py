@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import *
 
-from .configuration import TransportParameterType, QUICLY_DEFAULTS
+from .configuration import load_transport_parameters, TRANSPORT_PARAM_ID_BY_FIELD, TRANSPORT_PARAM_FIELD_BY_ID, TRANSPORT_PARAM_IS_FLAG
 from .exceptions import QuicConnectionError, QuicErrorCode
 
 
@@ -681,8 +681,13 @@ class DatagramFrame(FrameSubtype):
 
 @dataclass
 class TransportParameter:
-    param_id: TransportParameterType
+    param_id: int
     value: int | bool
+
+    def __post_init__(self):
+        # check that param_id is valid:
+        if self.param_id not in TRANSPORT_PARAM_FIELD_BY_ID.keys():
+            raise ValueError(f"TransportParameter ID {self.param_id} not defined")
 
     def encode(self) -> bytes:
         pid_bytes = encode_var_length_int(int(self.param_id))
@@ -697,16 +702,15 @@ class TransportParameter:
 
     @classmethod
     def decode(cls, data: bytes) -> tuple[None, int] | tuple["TransportParameter", int]:
-        pid_val, offset_pid = decode_var_length_int(data)
+        pid, offset_pid = decode_var_length_int(data)
         # if more data present, try to parse value length next:
-        value_len, offset = decode_var_length_int(data[offset_pid:], offset_pid) if offset_pid < len(data) else (-1,
-                                                                                                                 offset_pid)
-        try:
-            pid = TransportParameterType(pid_val)
-        except ValueError:
+        value_len, offset = decode_var_length_int(data[offset_pid:], offset_pid) \
+            if offset_pid < len(data) \
+            else (-1, offset_pid)
+        if pid not in TRANSPORT_PARAM_FIELD_BY_ID.keys():
             # unknown parameter id: skip by reading its length and skipping value bytes
             return None, offset + (value_len if value_len > 0 else 0)
-        if isinstance(QUICLY_DEFAULTS[pid], bool):  # parsing a flag
+        if TRANSPORT_PARAM_IS_FLAG[TRANSPORT_PARAM_FIELD_BY_ID[pid]]:  # parsing a flag
             if value_len == 0:
                 value = True
             else:
@@ -729,9 +733,11 @@ def encode_transport_params(params: List[TransportParameter],
     """
     out_items = []
     if include_defaults:
+        default_tps_as_dict = load_transport_parameters().to_config_map()
         defined_keys = {tp.param_id for tp in params}
-        out_items = [TransportParameter(pid, value) for pid, value in dict(QUICLY_DEFAULTS).items() if
-                     not pid in defined_keys]
+        out_items = [TransportParameter(TRANSPORT_PARAM_ID_BY_FIELD[name], value)
+                     for name, value in default_tps_as_dict.items()
+                     if not TRANSPORT_PARAM_ID_BY_FIELD[name] in defined_keys]
     if params is not None:
         out_items.extend(params)
     out = bytearray()
@@ -745,7 +751,7 @@ def decode_transport_params(buf: bytes) -> List[TransportParameter]:
 
     Unknown PARAM_IDs are skipped.  Duplicates use the last value parsed.
     """
-    out: Dict[TransportParameterType, TransportParameter] = {}
+    out: Dict[int, TransportParameter] = {}
     while len(buf) > 0:
         tp, offset = TransportParameter.decode(buf)
         buf = buf[offset:]

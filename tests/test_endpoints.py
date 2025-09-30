@@ -9,7 +9,7 @@ import trio
 from typing import *
 import pytest
 
-from quicly.configuration import QuicConfiguration, TransportParameterType, update_config
+from quicly.configuration import QuicConfiguration #, update_config
 from quicly.endpoint import QuicServer, QuicClient, QuicEndpoint
 from quicly.connection import SimpleQuicConnection, ConnectionState
 from quicly.server import open_quic_servers
@@ -63,7 +63,7 @@ async def quic_echo_server(
         autocancel: bool = True,
         ipv6: bool = False,
         delay: int = 0,
-        transport_parameters: dict[TransportParameterType, int | bool] | None = None,
+        transport_parameters: dict[int, int | bool] | None = None,
 ) -> AsyncGenerator[tuple[QuicServer, tuple[str, int]], None]:
     with local_endpoint(ipv6=ipv6) as server_endpoint:
         server = cast(QuicServer, server_endpoint)
@@ -81,7 +81,7 @@ async def quic_echo_server(
                     # await server_stream.do_handshake()
                     # print("server finished do_handshake")
                     # TODO: if DATAGRAM supported, use channel semantics, otherwise stream semantics:
-                    if server_channel.configuration.transport_parameters.max_datagram_frame_size:
+                    if server_channel.configuration.transport_local.max_datagram_frame_size:
                         async for packet in server_channel:
                             # print(f"echoing {packet!r} -> {server_stream.remote_address!r}")
                             await trio.sleep(delay)
