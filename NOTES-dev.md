@@ -35,7 +35,7 @@ $ poetry show --tree --why cffi  # to see which dependencies require `cffi`
 
 To run your script simply use `poetry run python your_script.py`. 
 
-Develop in Python 3.10: `$ poetry env use python3.10`
+Develop in Python 3.11: `$ poetry env use python3.11` or `$ poetry env use 3.11`
 
 To run tests in development Python: `$ poetry run pytest`
 
