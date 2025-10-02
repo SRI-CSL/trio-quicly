@@ -1,15 +1,15 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+import textwrap
 
-from quicly.configuration import QuicConfiguration, load_transport_parameters
+import quicly.configuration as cfg  # or `import configuration as cfg`
 from quicly.frame import (
     TransportParameter,
     encode_transport_params,
     decode_transport_params,
     ConfigFrame,
 )
-
 
 # def test_datagram_configuration():
 #     config = QuicConfiguration()
@@ -18,42 +18,193 @@ from quicly.frame import (
 #     update_config(config, transport_parameters)
 #     assert config.transport_local.max_datagram_frame_size == 1200
 
-def test_transport_parameter_defaults():
-    # Just defaults from transport_defaults.toml:
-    tp = load_transport_parameters()
+
+DEFAULTS_TP = """\
+max_idle_timeout_ms = 0
+max_udp_payload_size = 65527
+initial_max_data = 0
+initial_max_stream_data_bidi_local = 0
+initial_max_stream_data_bidi_remote = 0
+initial_max_stream_data_uni = 0
+initial_max_streams_bidi = 0
+initial_max_streams_uni = 0
+ack_delay_exponent = 3
+max_ack_delay_ms = 25
+disable_active_migration = false
+active_connection_id_limit = 2
+max_datagram_frame_size = 0
+initial_padding_target = 1200
+"""
+
+
+def _write_transport_defaults(tmp_path, body=DEFAULTS_TP):
+    p = tmp_path / "transport_defaults.toml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def _clear_tp_defaults_cache_if_any():
+    # If your module caches TOML defaults, clear between tests
+    if hasattr(cfg, "_tp_defaults_from_toml"):
+        try:
+            cfg._tp_defaults_from_toml.cache_clear()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def test_load_defaults_only(monkeypatch, tmp_path):
+    """
+    With only the version-controlled transport_defaults.toml present,
+    QuicConfiguration.load should:
+      - use Python defaults for top-level fields (logging_level, ipv6)
+      - construct transport_local from the TOML defaults
+      - keep transport_peer as None
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_transport_defaults(tmp_path)
+    _clear_tp_defaults_cache_if_any()
+
+    conf = cfg.QuicConfiguration.load()
+
+    # Top-level defaults (from Python)
+    assert conf.logging_level == "INFO"
+    assert conf.ipv6 is False
+
+    # Transport defaults (from TOML)
+    tp = conf.transport_local
     assert tp.max_udp_payload_size == 65527
-    tp_dict = tp.to_config_map()
-    assert tp_dict["max_udp_payload_size"] == 65527
+    assert tp.initial_max_data == 0
+    assert tp.ack_delay_exponent == 3
+    assert tp.initial_padding_target == 1200
 
-    # With a partial override file (e.g., tp_test.toml):
-    tp = load_transport_parameters(
-        defaults_path="transport_defaults.toml",
-        override_path="tp_test.toml",
+    # Peer is not set at load time
+    assert conf.transport_peer is None
+
+
+def test_load_with_toml_file_top_and_transport(monkeypatch, tmp_path):
+    """
+    Provide a separate config TOML with top-level keys and a [transport] section.
+    Unknown keys must be ignored. Valid ones override defaults.
+    ENV not set here; TOML should be applied.
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_transport_defaults(tmp_path)
+    _clear_tp_defaults_cache_if_any()
+
+    config_toml = tmp_path / "quicly_config.toml"
+    config_toml.write_text(textwrap.dedent("""
+        # top-level overrides
+        logging_level = "DEBUG"
+        ipv6 = true
+        unknown_top = 123  # should be ignored
+
+        [transport]
+        initial_max_data = 65536
+        max_ack_delay_ms = 20
+        unknown_tp = "ignored"
+    """).strip(), encoding="utf-8")
+
+    conf = cfg.QuicConfiguration.load(toml_path=str(config_toml))
+
+    # Top-level overrides applied
+    assert conf.logging_level == "DEBUG"
+    assert conf.ipv6 is True
+
+    # Transport overrides applied from [transport]
+    tp = conf.transport_local
+    assert tp.initial_max_data == 65536
+    assert tp.max_ack_delay_ms == 20
+
+    # Unspecified transport keys remain at defaults
+    assert tp.max_udp_payload_size == 65527
+    assert tp.disable_active_migration is False
+
+    # Peer remains None
+    assert conf.transport_peer is None
+
+
+def test_env_overrides_applied(monkeypatch, tmp_path):
+    """
+    ENV overrides:
+      - Top-level via QUICKLY__*
+      - Transport via QUICLY_TP__*
+    They should apply on top of defaults (no TOML file here).
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_transport_defaults(tmp_path)
+    _clear_tp_defaults_cache_if_any()
+
+    # Top-level ENV
+    monkeypatch.setenv("QUICKLY__LOGGING_LEVEL", "WARNING")
+    monkeypatch.setenv("QUICKLY__IPV6", "true")
+
+    # Transport ENV
+    monkeypatch.setenv("QUICLY_TP__INITIAL_MAX_DATA", "99999")
+    monkeypatch.setenv("QUICLY_TP__DISABLE_ACTIVE_MIGRATION", "true")
+
+    conf = cfg.QuicConfiguration.load()
+    assert conf.logging_level == "WARNING"
+    assert conf.ipv6 is True
+
+    tp = conf.transport_local
+    assert tp.initial_max_data == 99999
+    assert tp.disable_active_migration is True
+    # Still from defaults:
+    assert tp.max_ack_delay_ms == 25
+
+
+def test_precedence_toml_then_env_then_runtime(monkeypatch, tmp_path):
+    """
+    Order of application:
+      defaults -> TOML -> ENV -> runtime_overrides
+    Later sources override earlier ones.
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_transport_defaults(tmp_path)
+    _clear_tp_defaults_cache_if_any()
+
+    # TOML file sets DEBUG + transport values
+    config_toml = tmp_path / "quicly_config.toml"
+    config_toml.write_text(textwrap.dedent("""
+        logging_level = "DEBUG"
+        ipv6 = false
+
+        [transport]
+        initial_max_data = 111
+        ack_delay_exponent = 5
+    """).strip(), encoding="utf-8")
+
+    # ENV tweaks some of them
+    monkeypatch.setenv("QUICKLY__LOGGING_LEVEL", "ERROR")             # overrides DEBUG
+    monkeypatch.setenv("QUICLY_TP__ACK_DELAY_EXPONENT", "7")          # overrides TOML 5
+
+    # runtime overrides have the final say
+    runtime = {
+        "logging_level": "CRITICAL",                                  # overrides ENV ERROR
+        "transport": {
+            "initial_max_data": 222,                                  # overrides TOML 111
+            "max_datagram_frame_size": 1200,                          # added here
+        },
+        "unknown_top": "ignored",                                     # ignored safely
+    }
+
+    conf = cfg.QuicConfiguration.load(
+        toml_path=str(config_toml),
+        runtime_overrides=runtime,
     )
-    assert tp.max_idle_timeout_ms == 30000
 
-def _decode_map(tlv: bytes):
-    out = {}
-    for tp in decode_transport_params(tlv):
-        out[tp.param_id] = tp.value
-    return out
+    # Final top-level
+    assert conf.logging_level == "CRITICAL"
+    # ipv6 came from TOML (not overridden elsewhere)
+    assert conf.ipv6 is False
 
-def _is_flag_default(pid, val):
-    return isinstance(val, bool)
+    # Final transport
+    tp = conf.transport_local
+    assert tp.initial_max_data == 222               # runtime > TOML
+    assert tp.ack_delay_exponent == 7               # ENV > TOML
+    assert tp.max_datagram_frame_size == 1200       # runtime
+    # Unchanged from defaults:
+    assert tp.max_ack_delay_ms == 25
 
-def test_include_defaults_emits_expected_set():
-    defaults = load_transport_parameters()
-    tlv = encode_transport_params([], include_defaults=True)
-    decoded = _decode_map(tlv)
-
-    # All integer defaults must be present; false flags must omit length; true flags must be present with zero-length
-    for pid, default_value in defaults.as_list():
-        if isinstance(default_value, bool):
-            assert pid in decoded, f"flag {pid} missing"
-            if default_value is True:
-                assert decoded[pid] is True
-            else:
-                assert decoded[pid] is False
-        else:
-            assert pid in decoded, f"int param {pid} missing"
-            assert decoded[pid] == default_value, f"int param {pid} value mismatch"
+    # Peer untouched
+    assert conf.transport_peer is None

@@ -2,7 +2,7 @@
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace, is_dataclass
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -65,6 +65,9 @@ def _load_toml(path: str) -> dict:
       2) package resource next to this module (preferred for installed/wheel)
       3) filesystem path relative to this file
     """
+    if path is None:
+        return {}
+
     # 1) absolute or CWD-relative
     p = Path(path)
     if p.is_absolute() or p.exists():
@@ -275,87 +278,137 @@ def _tp_defaults_from_toml(path: str = "transport_defaults.toml") -> "TransportP
     cfg = d.get("transport", d)
     return TransportParameters(**cfg)
 
+def _apply_mapping_to_dataclass(dc_obj, mapping: Mapping[str, Any]) -> Any:
+    """
+    Return a new dataclass instance with only the intersecting fields updated.
+    Unknown keys are ignored. Nested dataclasses are not recursed here
+    (we handle transport separately).
+    """
+    if not is_dataclass(dc_obj):
+        raise TypeError("dc_obj must be a dataclass instance")
+    cur = asdict(dc_obj)
+    # Strictly update only known fields
+    for k, v in mapping.items():
+        key = k.strip()
+        # case-insensitive match for convenience
+        # Prefer exact match; fall back to lowercased lookup
+        if key in cur:
+            cur[key] = v
+        else:
+            lk = key.lower()
+            # find any field whose lower() matches
+            for field_name in cur.keys():
+                if field_name.lower() == lk:
+                    cur[field_name] = v
+                    break
+    return type(dc_obj)(**cur)
 
-# @dataclass
-# class QuicConfiguration:
-#     """
-#     A QUIC configuration.
-#     """
-#
-#     ipv6: bool = False
-#
-#     is_client: bool = True
-#     """
-#     Whether this is the client side of the QUIC connection.
-#     """
-#
-#     max_data: int = 1048576
-#     """
-#     Connection-wide flow control limit.
-#     """
-#
-#     max_datagram_size: int = SMALLEST_MAX_DATAGRAM_SIZE
-#     """
-#     The maximum QUIC payload size in bytes to send, excluding UDP or IP overhead.
-#     """
-#
-#     transport_local: QuicLyTransportParameters = field(default_factory=QuicLyTransportParameters)
-#     """
-#     QUIC-LY transport parameters for this endpoint.
-#     """
-#
-#     transport_peer: QuicLyTransportParameters = None  # to be filled after handshake
-#
-#     max_ack_intervals: int = 10
-#     """
-#     The maximum number of ACK intervals to retain after sending an ACK Frame.
-#     """
+def _env_to_mapping(prefix: str) -> dict[str, Any]:
+    """
+    Collect environment variables under `prefix` into a flat mapping using
+    lowercased keys, e.g. QUICKLY__LOGGING_LEVEL=DEBUG -> {"logging_level": "DEBUG"}.
+    For nested paths using __ separators, we only care about the final key
+    (since we don't have nested top-level in QuicConfiguration itself).
+    """
+    n = len(prefix)
+    out: dict[str, Any] = {}
+    for key, val in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        # Take the last segment for the key (QUICKLY__FOO__BAR -> "bar")
+        parts = key[n:].split("__")
+        leaf = parts[-1].strip().lower()
+        out[leaf] = _coerce_env(val)
+    return out
+
+def _apply_transport_overrides(tp, overrides: Mapping[str, Any]) -> Any:
+    """
+    Return a new TransportParameters reflecting the provided overrides.
+    Unknown keys are ignored (by intersecting with existing fields).
+    """
+    return _apply_mapping_to_dataclass(tp, overrides)
+
 
 @dataclass
 class QuicConfiguration:
-    # Non-transport settings
+    # top-level fields (separate from QUIC-LY Transport Parameters)
     logging_level: str = "INFO"
     ipv6: bool = False
     is_client: bool = True
+    max_ack_intervals: int = 10
 
-    # Transport (local) + peer (filled after handshake)
-    transport_local: TransportParameters = field(default_factory=TransportParameters)
-    transport_peer: Optional[TransportParameters] = None
+    transport_local: TransportParameters = field(default_factory=lambda: load_transport_parameters())
+    transport_peer: Optional[TransportParameters] = None  # always None at load
 
     @classmethod
     def load(
         cls,
-        config_path: str = "config.toml",
         *,
-        env_prefix: str = "QUICLY__",
+        toml_path: Optional[str] = None,
+        env_prefix_top: str = "QUICKLY__",       # top-level ENV (per your request)
+        env_prefix_tp: str = "QUICLY_TP__",      # transport ENV (unchanged)
         runtime_overrides: Optional[Mapping[str, Any]] = None,
     ) -> "QuicConfiguration":
         """
-        Load configuration as:
-          config.toml and transport.toml (in TransportParameters) → ENV → runtime_overrides
+        Build a configuration as:
+          1) Python defaults (top-level) + TransportParameters from transport_defaults.toml
+          2) TOML file overrides (top-level and [transport]) if provided
+          3) ENV overrides (QUICKLY__ for top-level, QUICLY_TP__ for transport)
+          4) runtime_overrides mapping; nested {"transport": {...}} applies to transport
+        Unknown keys are ignored at each step. transport_peer remains None.
         """
-        cfg = _load_toml(config_path)
+        # 1) Baseline defaults
+        conf = cls()
 
-        _apply_env_overrides(cfg, prefix=env_prefix)
+        # 2) Optional TOML file with overrides
+        if toml_path:
+            toml_data = _load_toml(toml_path)
+
+            # top-level: only keys that match QuicConfiguration fields (excluding transport_peer)
+            top_overrides = {
+                k: v for k, v in toml_data.items()
+                if k != "transport" and hasattr(conf, k)
+            }
+            if top_overrides:
+                conf = replace(conf, **top_overrides)
+
+            # [transport] section
+            if isinstance(toml_data.get("transport"), Mapping):
+                conf.transport_local = _apply_transport_overrides(conf.transport_local, toml_data["transport"])
+
+        # 3) ENV overrides
+        # 3a) Top-level via QUICKLY__*
+        top_env = _env_to_mapping(env_prefix_top)
+        if top_env:
+            # only apply keys that exist on QuicConfiguration (ignore unknowns)
+            valid = {k: v for k, v in top_env.items() if hasattr(conf, k)}
+            if valid:
+                conf = replace(conf, **valid)
+
+        # 3b) Transport via QUICLY_TP__*
+        tp_env = _env_to_mapping(env_prefix_tp)
+        if tp_env:
+            conf.transport_local = _apply_transport_overrides(conf.transport_local, tp_env)
+
+        # 4) runtime overrides
         if runtime_overrides:
-            _deep_update(cfg, runtime_overrides)
+            # split transport and top-level
+            ro_tp = None
+            if "transport" in runtime_overrides and isinstance(runtime_overrides["transport"], Mapping):
+                ro_tp = runtime_overrides["transport"]
 
-        # Pull top-level sections with safe defaults
-        logging_section = cfg.get("logging", {})
-        endpoint_section = cfg.get("endpoint", {})
+            ro_top = {
+                k: v for k, v in runtime_overrides.items()
+                if k != "transport" and hasattr(conf, k)
+            }
+            if ro_top:
+                conf = replace(conf, **ro_top)
+            if ro_tp:
+                conf.transport_local = _apply_transport_overrides(conf.transport_local, ro_tp)
 
-        transport_section = cfg.get("transport", {})
-
-        # Build typed objects
-        transport_local = TransportParameters(**{k: transport_section.get(k, getattr(TransportParameters, k))
-                                             for k in TransportParameters().__dict__.keys()})
-
-        return cls(
-            logging_level=str(logging_section.get("level", "INFO")),
-            ipv6=bool(endpoint_section.get("ipv6", False)),
-            transport_local=transport_local,
-            transport_peer=None,
-        )
+        # Ensure peer stays None at load time
+        conf.transport_peer = None
+        return conf
 
     def set_peer_transport(self, peer_tp: Mapping[str, Any]) -> None:
         """
@@ -372,9 +425,3 @@ class QuicConfiguration:
 
     def peer_tp_map(self) -> Optional[dict[str, int | bool]]:
         return None if self.transport_peer is None else self.transport_peer.to_config_map()
-
-# def update_config(config: QuicConfiguration,
-#                   transport_parameters: dict[TransportParameterType | str | int, int | bool]):
-#     tps = config.transport_local
-#     if tps.update(transport_parameters):
-#         config.transport_local = tps
