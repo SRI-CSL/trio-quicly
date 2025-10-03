@@ -97,7 +97,7 @@ def test_as_list():
     assert tp.initial_padding_target == 2400
 
 DEFAULTS = """\
-max_idle_timeout_ms = 0
+max_idle_timeout = 0
 max_udp_payload_size = 65527
 initial_max_data = 0
 initial_max_stream_data_bidi_local = 0
@@ -106,7 +106,7 @@ initial_max_stream_data_uni = 0
 initial_max_streams_bidi = 0
 initial_max_streams_uni = 0
 ack_delay_exponent = 3
-max_ack_delay_ms = 25
+max_ack_delay = 25
 disable_active_migration = false
 active_connection_id_limit = 2
 max_datagram_frame_size = 0
@@ -121,14 +121,14 @@ def test_config_from_files_and_env(tmp_path, monkeypatch):
     override_path = tmp_path / "tp_test.toml"
     override_path.write_text(
         # flat or [transport]-scoped; both are supported by the loader
-        "initial_max_data = 65536\nmax_ack_delay_ms = 20\n",
+        "initial_max_data = 65536\nmax_ack_delay = 20\n",
         encoding="utf-8",
     )
 
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         #
-        "initial_max_data = 65536\nmax_ack_delay_ms = 20\n",
+        "initial_max_data = 65536\nmax_ack_delay = 20\n",
         encoding="utf-8",
     )
 
@@ -156,7 +156,7 @@ def test_config_from_files_and_env(tmp_path, monkeypatch):
 
     # 5) assert effective values
     assert tp.initial_max_data == 65536            # from override file
-    assert tp.max_ack_delay_ms == 20               # from override file
+    assert tp.max_ack_delay == 20               # from override file
     assert tp.disable_active_migration is True     # from ENV
     assert tp.max_datagram_frame_size == 1200      # from ENV
     assert tp.ack_delay_exponent == 10             # from runtime overrides

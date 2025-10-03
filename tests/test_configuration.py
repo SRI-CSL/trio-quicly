@@ -11,16 +11,8 @@ from quicly.frame import (
     ConfigFrame,
 )
 
-# def test_datagram_configuration():
-#     config = QuicConfiguration()
-#     assert config.transport_local.max_datagram_frame_size == 0
-#     transport_parameters = {TransportParameterType.MAX_DATAGRAM_FRAME_SIZE : 1200}  # add DATAGRAM support
-#     update_config(config, transport_parameters)
-#     assert config.transport_local.max_datagram_frame_size == 1200
-
-
 DEFAULTS_TP = """\
-max_idle_timeout_ms = 0
+max_idle_timeout = 0
 max_udp_payload_size = 65527
 initial_max_data = 0
 initial_max_stream_data_bidi_local = 0
@@ -29,7 +21,7 @@ initial_max_stream_data_uni = 0
 initial_max_streams_bidi = 0
 initial_max_streams_uni = 0
 ack_delay_exponent = 3
-max_ack_delay_ms = 25
+max_ack_delay = 25
 disable_active_migration = false
 active_connection_id_limit = 2
 max_datagram_frame_size = 0
@@ -100,7 +92,7 @@ def test_load_with_toml_file_top_and_transport(monkeypatch, tmp_path):
 
         [transport]
         initial_max_data = 65536
-        max_ack_delay_ms = 20
+        max_ack_delay = 20
         unknown_tp = "ignored"
     """).strip(), encoding="utf-8")
 
@@ -113,7 +105,7 @@ def test_load_with_toml_file_top_and_transport(monkeypatch, tmp_path):
     # Transport overrides applied from [transport]
     tp = conf.transport_local
     assert tp.initial_max_data == 65536
-    assert tp.max_ack_delay_ms == 20
+    assert tp.max_ack_delay == 20
 
     # Unspecified transport keys remain at defaults
     assert tp.max_udp_payload_size == 65527
@@ -150,7 +142,7 @@ def test_env_overrides_applied(monkeypatch, tmp_path):
     assert tp.initial_max_data == 99999
     assert tp.disable_active_migration is True
     # Still from defaults:
-    assert tp.max_ack_delay_ms == 25
+    assert tp.max_ack_delay == 25
 
 
 def test_precedence_toml_then_env_then_runtime(monkeypatch, tmp_path):
@@ -167,7 +159,7 @@ def test_precedence_toml_then_env_then_runtime(monkeypatch, tmp_path):
     config_toml = tmp_path / "quicly_config.toml"
     config_toml.write_text(textwrap.dedent("""
         logging_level = "DEBUG"
-        ipv6 = false
+        ipv6 = true
 
         [transport]
         initial_max_data = 111
@@ -196,7 +188,7 @@ def test_precedence_toml_then_env_then_runtime(monkeypatch, tmp_path):
     # Final top-level
     assert conf.logging_level == "CRITICAL"
     # ipv6 came from TOML (not overridden elsewhere)
-    assert conf.ipv6 is False
+    assert conf.ipv6 is True
 
     # Final transport
     tp = conf.transport_local
@@ -204,7 +196,17 @@ def test_precedence_toml_then_env_then_runtime(monkeypatch, tmp_path):
     assert tp.ack_delay_exponent == 7               # ENV > TOML
     assert tp.max_datagram_frame_size == 1200       # runtime
     # Unchanged from defaults:
-    assert tp.max_ack_delay_ms == 25
+    assert tp.max_ack_delay == 25
 
     # Peer untouched
     assert conf.transport_peer is None
+
+def test_datagram_configuration():
+    config = cfg.QuicConfiguration()
+    assert config.transport_local.max_datagram_frame_size == 0
+    transport_parameters = {"max_datagram_frame_size": 1200}  # add DATAGRAM support
+    changed = config.update_transport(transport_parameters, target="local")
+    assert changed is True
+    assert config.transport_local.max_datagram_frame_size == 1200
+    # until peer is set, effectively no DATAGRAM support?
+    assert config.effective_max_datagram == 0

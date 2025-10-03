@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import *
 
-from .configuration import load_transport_parameters, TRANSPORT_PARAM_ID_BY_FIELD, TRANSPORT_PARAM_FIELD_BY_ID, TRANSPORT_PARAM_IS_FLAG
+from .configuration import load_transport_parameters, TP_ID_BY_NAME, TP_NAME_BY_ID, TP_IS_FLAG
 from .exceptions import QuicConnectionError, QuicErrorCode
 
 
@@ -686,7 +686,7 @@ class TransportParameter:
 
     def __post_init__(self):
         # check that param_id is valid:
-        if self.param_id not in TRANSPORT_PARAM_FIELD_BY_ID.keys():
+        if self.param_id not in TP_NAME_BY_ID.keys():
             raise ValueError(f"TransportParameter ID {self.param_id} not defined")
 
     def encode(self) -> bytes:
@@ -707,10 +707,10 @@ class TransportParameter:
         value_len, offset = decode_var_length_int(data[offset_pid:], offset_pid) \
             if offset_pid < len(data) \
             else (-1, offset_pid)
-        if pid not in TRANSPORT_PARAM_FIELD_BY_ID.keys():
+        if pid not in TP_NAME_BY_ID.keys():
             # unknown parameter id: skip by reading its length and skipping value bytes
             return None, offset + (value_len if value_len > 0 else 0)
-        if TRANSPORT_PARAM_IS_FLAG[TRANSPORT_PARAM_FIELD_BY_ID[pid]]:  # parsing a flag
+        if TP_IS_FLAG[TP_NAME_BY_ID[pid]]:  # parsing a flag
             if value_len == 0:
                 value = True
             else:
@@ -723,21 +723,24 @@ class TransportParameter:
                 return None, offset
         return cls(pid, value), offset
 
+    @classmethod
+    def from_pair(cls, pair: tuple[int, int | bool]) -> "TransportParameter":
+        return cls(pair[0], pair[1])
 
 def encode_transport_params(params: List[TransportParameter],
                             include_defaults: bool = False) -> bytes:
-    """Build a TLV list for CONFIG/CONFIG-ACK.
+    """Build a TLV list for CONFIG/CONFIG-ACK frame.
 
     If include_defaults is True, emit all known parameters using defaults for any
     missing field. Otherwise, emit only provided keys.
     """
     out_items = []
     if include_defaults:
-        default_tps_as_dict = load_transport_parameters().to_config_map()
+        default_tps_as_dict = load_transport_parameters().to_id_value_map()
         defined_keys = {tp.param_id for tp in params}
-        out_items = [TransportParameter(TRANSPORT_PARAM_ID_BY_FIELD[name], value)
-                     for name, value in default_tps_as_dict.items()
-                     if not TRANSPORT_PARAM_ID_BY_FIELD[name] in defined_keys]
+        out_items = [TransportParameter(pid, value)
+                     for pid, value in default_tps_as_dict.items()
+                     if not pid in defined_keys]
     if params is not None:
         out_items.extend(params)
     out = bytearray()
@@ -764,7 +767,7 @@ def decode_transport_params(buf: bytes) -> List[TransportParameter]:
 @register_frame_type(QuicFrameType.CONFIG_ACK)
 @dataclass
 class ConfigFrame(FrameSubtype):
-    transport_parameters: List[TransportParameter]
+    transport_parameters: List[TransportParameter] = field(default_factory=lambda: [])
 
     def encode(self, frame_type: int = QuicFrameType.CONFIG) -> bytes:
         tlv_list_bytes = encode_transport_params(self.transport_parameters)
@@ -774,3 +777,6 @@ class ConfigFrame(FrameSubtype):
     def decode(cls, data: bytes) -> tuple["ConfigFrame", int]:
         data_length, offset = decode_var_length_int(data)
         return cls(decode_transport_params(data[offset:offset + data_length])), offset + data_length
+
+    def tps_as_dict(self) -> dict[int, int | bool]:
+        return {tp.param_id: tp.value for tp in self.transport_parameters}

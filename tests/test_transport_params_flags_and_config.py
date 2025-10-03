@@ -7,7 +7,7 @@ except Exception:  # pragma: no cover
 
 
 DEFAULTS_TOML = textwrap.dedent("""
-max_idle_timeout_ms = 0
+max_idle_timeout = 0
 max_udp_payload_size = 65527
 initial_max_data = 0
 initial_max_stream_data_bidi_local = 0
@@ -16,7 +16,7 @@ initial_max_stream_data_uni = 0
 initial_max_streams_bidi = 0
 initial_max_streams_uni = 0
 ack_delay_exponent = 3
-max_ack_delay_ms = 25
+max_ack_delay = 25
 disable_active_migration = false
 active_connection_id_limit = 2
 max_datagram_frame_size = 0
@@ -45,12 +45,12 @@ def test_tp_to_id_value_map_and_flag_presence(monkeypatch, tmp_path):
     # flag present iff True
     assert idmap.get(0x0c) is True
 
-    # turning the flag off removes it from the map
+    # turning the flag off does not remove it from the map, only from the encoding!
     tp2 = cfg.load_transport_parameters(
         runtime_overrides={"disable_active_migration": False}
     )
     idmap2 = tp2.to_id_value_map()
-    assert 0x0c not in idmap2
+    assert idmap2[0x0c] is False
 
 
 def test_as_list_flag_encoding_rules(monkeypatch, tmp_path):

@@ -8,7 +8,7 @@ except Exception:  # pragma: no cover - fallback for local runs
 
 
 DEFAULTS_TOML = textwrap.dedent("""
-max_idle_timeout_ms = 0
+max_idle_timeout = 0
 max_udp_payload_size = 65527
 initial_max_data = 0
 initial_max_stream_data_bidi_local = 0
@@ -17,7 +17,7 @@ initial_max_stream_data_uni = 0
 initial_max_streams_bidi = 0
 initial_max_streams_uni = 0
 ack_delay_exponent = 3
-max_ack_delay_ms = 25
+max_ack_delay = 25
 disable_active_migration = false
 active_connection_id_limit = 2
 max_datagram_frame_size = 0
@@ -53,13 +53,13 @@ def test_partial_override_file(monkeypatch, tmp_path):
 
     # Provide a partial override TOML (may be flat or under [transport])
     (tmp_path / "tp_test.toml").write_text(
-        "initial_max_data = 65536\nmax_ack_delay_ms = 20\n", encoding="utf-8"
+        "initial_max_data = 65536\nmax_ack_delay = 20\n", encoding="utf-8"
     )
 
     tp = cfg.load_transport_parameters(override_path="tp_test.toml")
 
     assert tp.initial_max_data == 65536
-    assert tp.max_ack_delay_ms == 20
+    assert tp.max_ack_delay == 20
     # untouched fields come from defaults.toml
     assert tp.max_udp_payload_size == 65527
     assert tp.disable_active_migration is False
@@ -78,7 +78,7 @@ def test_env_overrides(monkeypatch, tmp_path):
     assert tp.initial_max_data == 99999
     assert tp.disable_active_migration is True
     # others unchanged
-    assert tp.max_ack_delay_ms == 25
+    assert tp.max_ack_delay == 25
 
 
 def test_runtime_overrides(monkeypatch, tmp_path):
@@ -119,7 +119,7 @@ def test_as_list_all_and_excluding_defaults(monkeypatch, tmp_path):
     assert 0x04 in mids                    # initial_max_data changed
     assert 0x0c in mids                    # flag present because set True
     # A default-equal param should be absent
-    assert 0x0b not in mids                # max_ack_delay_ms still 25 (default)
+    assert 0x0b not in mids                # max_ack_delay still 25 (default)
 
 
 def test_ordering_is_spec_order(monkeypatch, tmp_path):

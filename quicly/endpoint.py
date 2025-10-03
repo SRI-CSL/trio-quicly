@@ -1,6 +1,7 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
+import math
 from contextlib import contextmanager, suppress, asynccontextmanager
 import errno
 import trio
@@ -391,8 +392,8 @@ class QuicClient(QuicEndpoint):
                                               configuration=client_configuration)
             connection.start_background(nursery)
 
-            with trio.move_on_after(connection.configuration.transport_local.idle_timeout_ms * K_MILLI_SECOND) \
-                    as cancel_scope:
+            idle_timeout_s = connection.configuration.transport_local.max_idle_timeout * K_MILLI_SECOND
+            with trio.move_on_after(idle_timeout_s if idle_timeout_s > 0 else math.inf) as cancel_scope:
                 initial_pkt = connection.init_handshake()
                 await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed
                 async for (payload, remote_address, destination_cid) in self._new_connections_q.r:

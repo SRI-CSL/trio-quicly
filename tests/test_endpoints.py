@@ -9,7 +9,7 @@ import trio
 from typing import *
 import pytest
 
-from quicly.configuration import QuicConfiguration #, update_config
+from quicly.configuration import QuicConfiguration
 from quicly.endpoint import QuicServer, QuicClient, QuicEndpoint
 from quicly.connection import SimpleQuicConnection, ConnectionState
 from quicly.server import open_quic_servers
@@ -63,7 +63,7 @@ async def quic_echo_server(
         autocancel: bool = True,
         ipv6: bool = False,
         delay: int = 0,
-        transport_parameters: dict[int, int | bool] | None = None,
+        transport_parameters: dict[str | int, int | bool] | None = None,
 ) -> AsyncGenerator[tuple[QuicServer, tuple[str, int]], None]:
     with local_endpoint(ipv6=ipv6) as server_endpoint:
         server = cast(QuicServer, server_endpoint)
@@ -94,8 +94,8 @@ async def quic_echo_server(
                 except trio.BrokenResourceError:  # pragma: no cover
                     print("echo handler channel broken")
 
-            server_config = QuicConfiguration(is_client=False)
-            update_config(server_config, transport_parameters)
+            server_config = QuicConfiguration(is_client=False, ipv6=ipv6)
+            server_config.update_transport(transport_parameters, "local")
             await nursery.start(server.serve, echo_handler, nursery, )
 
             yield server, server.socket.getsockname()
@@ -105,13 +105,13 @@ async def quic_echo_server(
 
 # TODO: @parametrize_ipv6, also remove = False default below
 async def test_smoke_datagram(ipv6: bool = False) -> None:
-    transport_parameters = {TransportParameterType.MAX_DATAGRAM_FRAME_SIZE : 1200}  # add DATAGRAM support
+    transport_parameters = {"max_datagram_frame_size" : 1200}  # add DATAGRAM support
     async with quic_echo_server(True, ipv6=ipv6, delay=0,
-                              transport_parameters=transport_parameters) as (_server_endpoint, address):
+                                transport_parameters=transport_parameters) as (_server_endpoint, address):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
-            client_config = QuicConfiguration(is_client=True)
-            update_config(client_config, transport_parameters)
+            client_config = QuicConfiguration(is_client=True, ipv6=ipv6)
+            client_config.update_transport(transport_parameters, "local")
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       client_config) as client_channel:
                 assert client_channel.state == ConnectionState.ESTABLISHED
@@ -120,23 +120,24 @@ async def test_smoke_datagram(ipv6: bool = False) -> None:
                 answer = await client_channel.receive()
                 assert answer == b"hello"
                 await client_channel.send(b"goodbye")
-                assert await client_channel.receive() == b"goodbye"
+                answer = await client_channel.receive()
+                assert answer == b"goodbye"
 
 # TODO: test_fast_start (sending bytes with INITIAL...)
 
 # TODO: @parametrize_ipv6, also remove = False default below
 async def test_handshake_datagram(ipv6: bool = False) -> None:
-    transport_parameters = {TransportParameterType.MAX_DATAGRAM_FRAME_SIZE : 1200}  # add DATAGRAM support
+    transport_parameters = {"max_datagram_frame_size" : 2400}  # add DATAGRAM support
     async with quic_echo_server(True, ipv6=ipv6, delay=0,
-                              transport_parameters=transport_parameters) as (_server_endpoint, address):
+                                transport_parameters=transport_parameters) as (_server_endpoint, address):
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
-            client_config = QuicConfiguration(is_client=True)
-            update_config(client_config, transport_parameters)
+            client_config = QuicConfiguration(is_client=True, ipv6=ipv6)
+            client_config.update_transport(transport_parameters, "local")
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       client_config) as connection:
                 assert connection.state == ConnectionState.ESTABLISHED
-                await trio.sleep(0.5)  # let handshake finalize for server
+                await trio.sleep(0.1)  # let handshake finalize for server
                 server = cast(QuicServer, _server_endpoint)
                 assert connection.host_cid in server._connections.keys()
                 server_connection = server._connections[connection.host_cid]
