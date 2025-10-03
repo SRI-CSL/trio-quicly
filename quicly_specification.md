@@ -132,8 +132,8 @@ QUIC-LY uses the following subset of QUIC transport parameters and adds optional
 | 0x07  | initial_max_stream_data_uni            | varint | bytes | 0                         | yes  |
 | 0x08  | initial_max_streams_bidi               | varint | count | 0                         | yes  |
 | 0x09  | initial_max_streams_uni                | varint | count | 0                         | yes  |
-| 0x0a  | ack_delay_exponent                     | varint | —     | 3                         | yes  |
-| 0x0b  | max_ack_delay                          | varint | ms    | 25                        | yes  |
+| 0x0a  | ack_delay_exponent                     | varint | —     | 3 (MUST be ≤ 20 )         | yes  |
+| 0x0b  | max_ack_delay                          | varint | ms    | 25 (MUST be < 2^14)       | yes  |
 | 0x0c  | disable_active_migration               | flag   | —     | absent ⇒ false            | yes  |
 | 0x0e  | active_connection_id_limit             | varint | count | 2 (MUST be ≥ 2)           | yes  |
 | 0x20  | max_datagram_frame_size                | varint | bytes | 0 (absent ⇒ no support)   | RFC9221 |
