@@ -392,7 +392,9 @@ class QuicClient(QuicEndpoint):
                                               configuration=client_configuration)
             connection.start_background(nursery)
 
-            idle_timeout_s = connection.configuration.transport_local.max_idle_timeout * K_MILLI_SECOND
+            # we don't yet have the advertised max_idle_timeout from peer,
+            # so the effective value here is the locally configured one:
+            idle_timeout_s = connection.configuration.effective_max_idle_timeout * K_MILLI_SECOND
             with trio.move_on_after(idle_timeout_s if idle_timeout_s > 0 else math.inf) as cancel_scope:
                 initial_pkt = connection.init_handshake()
                 await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed

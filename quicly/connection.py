@@ -317,7 +317,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
     def _restart_idle_timer(self) -> None:
         # restart idle timer to configured timeout but at least 3x the current PTO timeout; skip if configured to 0
-        idle_timeout_s = self.configuration.transport_local.max_idle_timeout * K_MILLI_SECOND
+        idle_timeout_s = self.configuration.effective_max_idle_timeout * K_MILLI_SECOND
         if idle_timeout_s > 0:
             self._idle_timer.set_timer_after(max(idle_timeout_s, 3 * self._loss.get_probe_timeout()))
 
@@ -534,7 +534,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             self.state = ConnectionState.CLOSING if not self.is_closing else self.state
 
     def _handle_config(self, config_frame: ConfigFrame) -> bool:
-        return self.configuration.update_transport(config_frame.tps_as_dict(), "peer")
+        return self.configuration.apply_transport(config_frame.tps_as_dict())
 
     async def on_rx(self, quic_packets: List[QuicPacket], remote_addr: NetworkAddress = None) -> None:
         """
@@ -650,11 +650,13 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             if self.state == ConnectionState.DRAINING:
                 await self.aclose()
 
-    def get_peer_max_datagram_size(self) -> int:  # Linda: revisit after effective_* discussion!
-        if self.state != ConnectionState.ESTABLISHED:
-            self._qlog.warn("Peer transport parameters not negotiated", current_state=self.state)
-            raise RuntimeWarning("Peer transport parameters not negotiated")
-        return self.configuration.effective_max_datagram
+    # TODO: from RFC9221: An endpoint MUST NOT send DATAGRAM frames until it has received the max_datagram_frame_size
+    #  transport parameter with a non-zero value during the handshake (or during a previous handshake if 0-RTT is
+    #  used). An endpoint MUST NOT send DATAGRAM frames that are larger than the max_datagram_frame_size value it has
+    #  received from its peer. An endpoint that receives a DATAGRAM frame when it has not indicated support via the
+    #  transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION. Similarly,
+    #  an endpoint that receives a DATAGRAM frame that is larger than the value it sent in its max_datagram_frame_size
+    #  transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION.
 
     async def send(self, value: bytes) -> None:
         """

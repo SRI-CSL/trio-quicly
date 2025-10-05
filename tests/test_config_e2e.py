@@ -27,9 +27,12 @@ def test_config_roundtrip_client_server(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     # --- Client side setup ---
-    client = cfg.QuicConfiguration.load(runtime_overrides={"transport":{"max_datagram_frame_size": 1200}})
+    client = cfg.QuicConfiguration.load(runtime_overrides={"transport":{
+        "max_idle_timeout": 60000,
+        "max_datagram_frame_size": 1200}})
     # Local view should keep False flags visible:
     assert client.transport_local.disable_active_migration is False
+    assert client.transport_local.max_idle_timeout == 60000
     assert client.transport_local.max_datagram_frame_size == 1200
 
     # Build CONFIG from client's LOCAL params, omitting defaults for compactness
@@ -42,7 +45,7 @@ def test_config_roundtrip_client_server(monkeypatch, tmp_path):
 
     server = cfg.QuicConfiguration.load()
     assert isinstance(decoded.content, ConfigFrame)
-    changed = server.update_transport(decoded.content.tps_as_dict(),"peer")
+    changed = server.apply_transport(decoded.content.tps_as_dict())
     assert changed is True
     assert server.transport_peer is not None
     assert server.transport_peer.max_datagram_frame_size == 1200
@@ -51,9 +54,9 @@ def test_config_roundtrip_client_server(monkeypatch, tmp_path):
     assert server.transport_local.max_datagram_frame_size == 0
 
     # Server decides to support DATAGRAM=2400 locally and replies in CONFIG_ACK
-    server.update_transport({"max_datagram_frame_size": 2400}, "local")
+    server.update_local({"max_idle_timeout": 30000, "max_datagram_frame_size": 2400})
     assert server.transport_local.max_datagram_frame_size == 2400
-    assert server.effective_max_datagram == 1200
+    assert server.effective_max_idle_timeout == 30000
 
     server_encoded = _encode_quic_frame(server, QuicFrameType.CONFIG_ACK)
 
@@ -62,13 +65,13 @@ def test_config_roundtrip_client_server(monkeypatch, tmp_path):
     assert used2 == len(server_encoded)
     assert decoded2.frame_type == QuicFrameType.CONFIG_ACK
     assert isinstance(decoded2.content, ConfigFrame)
-    assert len(decoded2.content.transport_parameters) == 1
+    assert len(decoded2.content.transport_parameters) == 2  # updated 2 TPs
 
-    changed2 = client.update_transport(decoded2.content.tps_as_dict(), "peer")
+    changed2 = client.apply_transport(decoded2.content.tps_as_dict())
     assert changed2 is True
     assert client.transport_peer is not None
     assert client.transport_peer.max_datagram_frame_size == 2400
-    assert client.effective_max_datagram == 1200
+    assert client.effective_max_idle_timeout == 30000
 
 
 def test_false_flags_visible_in_config_omitted_on_wire(monkeypatch, tmp_path):
@@ -85,7 +88,7 @@ def test_false_flags_visible_in_config_omitted_on_wire(monkeypatch, tmp_path):
     # 1 (CONFIG type) + 1 (length = 0, as no change from default values) = 2 bytes
     assert len(c_encoded) == 2
 
-    c.update_transport({TP_ID_DISABLE_ACTIVE_MIGRATION: True}, "local")
+    c.update_local({TP_ID_DISABLE_ACTIVE_MIGRATION: True})
     # Visible in config:
     assert c.transport_local.disable_active_migration is True
 
@@ -122,9 +125,9 @@ def test_name_and_id_overrides_both_work(monkeypatch, tmp_path):
 
     conf = cfg.QuicConfiguration.load()
     # name form
-    assert conf.update_transport({"max_datagram_frame_size": 1300}, target="local") is True
+    assert conf.update_local({"max_datagram_frame_size": 1300}) is True
     assert conf.transport_local.max_datagram_frame_size == 1300
 
     # id form
-    assert conf.update_transport({TP_ID_MAX_DATAGRAM_FRAME_SIZE: 1400}, target="local") is True
+    assert conf.update_local({TP_ID_MAX_DATAGRAM_FRAME_SIZE: 1400}) is True
     assert conf.transport_local.max_datagram_frame_size == 1400

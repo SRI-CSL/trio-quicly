@@ -95,7 +95,7 @@ async def quic_echo_server(
                     print("echo handler channel broken")
 
             server_config = QuicConfiguration(is_client=False, ipv6=ipv6)
-            server_config.update_transport(transport_parameters, "local")
+            server_config.update_local(transport_parameters)
             await nursery.start(server.serve, echo_handler, nursery, )
 
             yield server, server.socket.getsockname()
@@ -111,7 +111,7 @@ async def test_smoke_datagram(ipv6: bool = False) -> None:
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
             client_config = QuicConfiguration(is_client=True, ipv6=ipv6)
-            client_config.update_transport(transport_parameters, "local")
+            client_config.update_local(transport_parameters)
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       client_config) as client_channel:
                 assert client_channel.state == ConnectionState.ESTABLISHED
@@ -133,7 +133,7 @@ async def test_handshake_datagram(ipv6: bool = False) -> None:
         with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
             client = cast(QuicClient, client_endpoint)
             client_config = QuicConfiguration(is_client=True, ipv6=ipv6)
-            client_config.update_transport(transport_parameters, "local")
+            client_config.update_local(transport_parameters)
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       client_config) as connection:
                 assert connection.state == ConnectionState.ESTABLISHED

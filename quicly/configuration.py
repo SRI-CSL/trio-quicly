@@ -1,7 +1,7 @@
 #  Copyright ©  2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-
+import math
 from dataclasses import dataclass, field, asdict, replace, is_dataclass, fields
 from functools import lru_cache
 from importlib.resources import files as ir_files  # py311+
@@ -133,20 +133,46 @@ def _load_toml(path: str) -> dict:
 @dataclass
 class TransportParameters:
     # No Python defaults: constructed from TOML
+    # Ranges for int's have 2**62 is the open, maximum value for encoding varint
     max_idle_timeout: int
-    max_udp_payload_size: int
+    max_udp_payload_size: int = field(metadata={"range": (1200, 2**62)})
     initial_max_data: int
     initial_max_stream_data_bidi_local: int
     initial_max_stream_data_bidi_remote: int
     initial_max_stream_data_uni: int
     initial_max_streams_bidi: int
     initial_max_streams_uni: int
-    ack_delay_exponent: int
-    max_ack_delay: int
+    ack_delay_exponent: int = field(metadata={"range": (0, 21)})
+    max_ack_delay: int = field(metadata={"range": (1, 2**14)})
     disable_active_migration: bool
-    active_connection_id_limit: int
+    active_connection_id_limit: int = field(metadata={"range": (2, 2**62)})
     max_datagram_frame_size: int
     initial_padding_target: int
+
+    @staticmethod
+    def _range_validator(name: str, value: int, r: tuple[int, int]) -> None:
+        if r is not None:
+            lo, hi = r
+            if not isinstance(value, int) or not (lo <= value < hi):
+                raise ValueError(f"{name} out of range [{lo}, {hi}[: {value}")
+
+    def __post_init__(self):
+        # validate constructor values
+        for name, f in self.__dataclass_fields__.items():  # type: ignore[attr-defined]
+            rng = f.metadata.get("range")
+            if rng is not None:
+                v = getattr(self, name)
+                self._range_validator(name, v, rng)
+
+    def __setattr__(self, name, value):
+        # validate on subsequent assignments
+        dcfields = self.__dict__.get("__dataclass_fields__") or getattr(self, "__dataclass_fields__", {})
+        f = dcfields.get(name)
+        if f is not None:
+            rng = f.metadata.get("range")
+            if rng is not None:
+                self._range_validator(name, value, rng)
+        super().__setattr__(name, value)
 
     def to_id_value_map(self) -> dict[int, int | bool]:
         """
@@ -300,7 +326,7 @@ class QuicConfiguration:
         conf.transport_peer = None
         return conf
 
-    def update_transport(self, overrides: dict[int | str, int | bool] | None = None, target: str = "peer") -> bool:
+    def _update_transport(self, overrides: dict[int | str, int | bool], target: str) -> bool:
         """
         Apply transport overrides to 'local' or 'peer'.
         - Accepts IDs or field names.
@@ -327,13 +353,37 @@ class QuicConfiguration:
         changed |= self.transport_peer.update(overrides)
         return changed
 
+    def update_local(self, overrides: dict[int | str, int | bool]) -> bool:
+        """
+        Update local transport parameters with given overrides return whether anything has changed.
+        Return False if overrides are None.
+        """
+        return self._update_transport(overrides, "local")
+
+    def apply_transport(self, overrides: dict[int | str, int | bool]) -> bool:
+        """
+        Apply given overrides to peer transport and return whether anything has changed.
+        Return False if overrides are None.
+        """
+        return self._update_transport(overrides, "peer")
+
     @property
-    def effective_max_datagram(self) -> int:
-        """
-        The usable DATAGRAM size is min(local, peer) if peer is set and non-zero; otherwise 0 (disabled).
-        """
-        local = self.transport_local.max_datagram_frame_size
-        peer = 0 if self.transport_peer is None else self.transport_peer.max_datagram_frame_size
-        if not local or not peer:
+    def has_received_peer_tp(self) -> bool:
+        return self.transport_peer is not None  # will be True once transport_peer set after handshake
+
+    @property
+    def effective_max_idle_timeout(self) -> float:
+        if not self.has_received_peer_tp:
+            return self.transport_local.max_idle_timeout
+        # calculate minimum of all non-zero values:
+        if self.transport_local.max_idle_timeout == 0:
+            return self.transport_peer.max_idle_timeout
+        if self.transport_peer.max_idle_timeout == 0:
+            return self.transport_local.max_idle_timeout
+        return min(self.transport_local.max_idle_timeout, self.transport_peer.max_idle_timeout)
+
+    @property
+    def peer_max_datagram_frame_size(self) -> int:
+        if not self.has_received_peer_tp:
             return 0
-        return min(local, peer)
+        return self.transport_peer.max_datagram_frame_size

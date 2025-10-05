@@ -205,8 +205,8 @@ def test_datagram_configuration():
     config = cfg.QuicConfiguration()
     assert config.transport_local.max_datagram_frame_size == 0
     transport_parameters = {"max_datagram_frame_size": 1200}  # add DATAGRAM support
-    changed = config.update_transport(transport_parameters, target="local")
+    changed = config.update_local(transport_parameters)
     assert changed is True
     assert config.transport_local.max_datagram_frame_size == 1200
     # until peer is set, effectively no DATAGRAM support?
-    assert config.effective_max_datagram == 0
+    assert config.peer_max_datagram_frame_size == 0
