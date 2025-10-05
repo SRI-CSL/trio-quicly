@@ -72,29 +72,29 @@ def env_to_mapping(prefix: str, sep: str = "__") -> dict[str, Any]:
     return out
 
 
-def _update_dc(dc_obj, mapping: Mapping[str, Any], *, casefold=True, ignore_unknown=True):
-    """Return a new dataclass with overlap in fields updated."""
-    if not is_dataclass(dc_obj):
-        raise TypeError("dc_obj must be a dataclass instance")
-    cur = asdict(dc_obj)
-    keys = list(cur.keys())
-
-    def set_key(k: str, v: Any):
-        if k in cur:
-            cur[k] = v
-            return True
-        if casefold:
-            lk = k.lower()
-            for name in keys:
-                if name.lower() == lk:
-                    cur[name] = v
-                    return True
-        return False
-
-    for k, v in mapping.items():
-        if not set_key(k, v) and not ignore_unknown:
-            raise KeyError(f"Unknown field: {k}")
-    return type(dc_obj)(**cur)
+# def _update_dc(dc_obj, mapping: Mapping[str, Any], *, casefold=True, ignore_unknown=True):
+#     """Return a new dataclass with overlap in fields updated."""
+#     if not is_dataclass(dc_obj):
+#         raise TypeError("dc_obj must be a dataclass instance")
+#     cur = asdict(dc_obj)
+#     keys = list(cur.keys())
+#
+#     def set_key(k: str, v: Any):
+#         if k in cur:
+#             cur[k] = v
+#             return True
+#         if casefold:
+#             lk = k.lower()
+#             for name in keys:
+#                 if name.lower() == lk:
+#                     cur[name] = v
+#                     return True
+#         return False
+#
+#     for k, v in mapping.items():
+#         if not set_key(k, v) and not ignore_unknown:
+#             raise KeyError(f"Unknown field: {k}")
+#     return type(dc_obj)(**cur)
 
 
 # ----- Robust TOML loader (CWD, absolute, or package resource) -----
@@ -195,7 +195,7 @@ class TransportParameters:
         the defaults.
         """
         current = asdict(self)
-        defaults = asdict(_tp_defaults_from_toml())
+        defaults = asdict(tp_defaults_from_toml())
         out: list[tuple[int, int | bool]] = []
         for name, pid, is_flag in TP_REGISTRY:
             if is_flag:
@@ -264,7 +264,7 @@ def load_transport_parameters(
 
 
 @lru_cache(maxsize=1)
-def _tp_defaults_from_toml(path: str = "transport_defaults.toml") -> "TransportParameters":
+def tp_defaults_from_toml(path: str = "transport_defaults.toml") -> "TransportParameters":
     d = _load_toml(path)
     # accept either a flat file or a [transport] table
     cfg = d.get("transport", d)
@@ -300,7 +300,7 @@ class QuicConfiguration:
             if top:
                 conf = replace(conf, **top)
             if isinstance(data.get("transport"), Mapping):
-                conf.transport_local = _update_dc(conf.transport_local, data["transport"])
+                conf.update_local(data["transport"])
 
         # 3) ENV overrides
         top_env = env_to_mapping(env_prefix_top)
@@ -310,7 +310,7 @@ class QuicConfiguration:
                 conf = replace(conf, **top_valid)
         tp_env = env_to_mapping(env_prefix_tp)
         if tp_env:
-            conf.transport_local = _update_dc(conf.transport_local, tp_env)
+            conf.update_local(tp_env)
 
         # 4) runtime overrides
         if runtime_overrides:
@@ -321,7 +321,7 @@ class QuicConfiguration:
             if ro_top:
                 conf = replace(conf, **ro_top)
             if ro_tp:
-                conf.transport_local = _update_dc(conf.transport_local, ro_tp)
+                conf.update_local(ro_tp)
 
         conf.transport_peer = None
         return conf
@@ -360,7 +360,7 @@ class QuicConfiguration:
         """
         return self._update_transport(overrides, "local")
 
-    def apply_transport(self, overrides: dict[int | str, int | bool]) -> bool:
+    def update_peer(self, overrides: dict[int | str, int | bool]) -> bool:
         """
         Apply given overrides to peer transport and return whether anything has changed.
         Return False if overrides are None.

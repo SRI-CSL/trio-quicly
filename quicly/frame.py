@@ -3,12 +3,16 @@
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 from enum import IntEnum
 from typing import *
 
-from .configuration import load_transport_parameters, TP_ID_BY_NAME, TP_NAME_BY_ID, TP_IS_FLAG
+from .configuration import TP_NAME_BY_ID, TP_IS_FLAG, tp_defaults_from_toml
 from .exceptions import QuicConnectionError, QuicErrorCode
 
+_ACK_DELAY_EXPS: ContextVar[Tuple[int, int]] = ContextVar("_ACK_DELAY_EXPS",
+                                                          default=(tp_defaults_from_toml().ack_delay_exponent,
+                                                                   tp_defaults_from_toml().ack_delay_exponent))
 
 # QUIC Frame
 # : The payload of QUIC Packets consists of a sequence of complete frames.
@@ -301,9 +305,6 @@ class ECNCounts:
         return cls(ect0, ect1, ce), offset
 
 
-ACK_DELAY_EXPONENT = 3  # Used to scale ack_delay to/from encoded value
-
-
 @register_frame_type(QuicFrameType.ACK)
 @register_frame_type(QuicFrameType.ACK_ECN)
 @dataclass
@@ -340,8 +341,24 @@ class ACKFrame(FrameSubtype):
     def ack_range_count(self) -> int:
         return len(self.ack_ranges)
 
+    @classmethod
+    def set_local_ack_delay_exp(cls, exp: Optional[int] = None) -> None:
+        cur_peer, _ = _ACK_DELAY_EXPS.get()
+        _ACK_DELAY_EXPS.set((cur_peer, exp if exp is None else int(exp)))
+
+    @classmethod
+    def set_peer_ack_delay_exp(cls, exp: Optional[int] = None) -> None:
+        # don't overwrite cur_peer with None: just keep old (potentially default) value
+        cur_peer, cur_local = _ACK_DELAY_EXPS.get()
+        _ACK_DELAY_EXPS.set((cur_peer if exp is None else int(exp), cur_local))
+
+    @classmethod
+    def _get_ack_delay_exps(cls) -> Tuple[int, int]:
+        return _ACK_DELAY_EXPS.get()
+
     def encode(self) -> bytes:
-        encoded_ack_delay = self.ack_delay // (1 << ACK_DELAY_EXPONENT)
+        _, local_exp = type(self)._get_ack_delay_exps()
+        encoded_ack_delay = self.ack_delay // (1 << local_exp)
         ack_ranges_bytes = b''.join(r.encode() for r in self.ack_ranges)
 
         frame_bytes = (
@@ -375,9 +392,10 @@ class ACKFrame(FrameSubtype):
         if frame_type == QuicFrameType.ACK_ECN:
             ecn_counts, ecn_offset = ECNCounts.decode(data[offset:])
 
+        peer_exp, _ = cls._get_ack_delay_exps()
         return cls(
             largest_ack=largest_ack,
-            ack_delay=encoded_ack_delay * (1 << ACK_DELAY_EXPONENT),
+            ack_delay=encoded_ack_delay * (1 << peer_exp),
             first_ack_range=first_ack_range,
             ack_ranges=ack_ranges,
             ecn_counts=ecn_counts
@@ -736,7 +754,7 @@ def encode_transport_params(params: List[TransportParameter],
     """
     out_items = []
     if include_defaults:
-        default_tps_as_dict = load_transport_parameters().to_id_value_map()
+        default_tps_as_dict = tp_defaults_from_toml().to_id_value_map()
         defined_keys = {tp.param_id for tp in params}
         out_items = [TransportParameter(pid, value)
                      for pid, value in default_tps_as_dict.items()

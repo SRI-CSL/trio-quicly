@@ -142,7 +142,7 @@ def test_config_from_files_and_env(tmp_path, monkeypatch):
     # (if you memoize defaults inside the module, clear the cache per test run)
     if hasattr(cfg, "_tp_defaults_from_toml"):
         try:
-            cfg._tp_defaults_from_toml.cache_clear()  # lru_cache safety
+            cfg.tp_defaults_from_toml.cache_clear()  # lru_cache safety
         except Exception:
             pass
 

@@ -45,7 +45,7 @@ def test_config_roundtrip_client_server(monkeypatch, tmp_path):
 
     server = cfg.QuicConfiguration.load()
     assert isinstance(decoded.content, ConfigFrame)
-    changed = server.apply_transport(decoded.content.tps_as_dict())
+    changed = server.update_peer(decoded.content.tps_as_dict())
     assert changed is True
     assert server.transport_peer is not None
     assert server.transport_peer.max_datagram_frame_size == 1200
@@ -67,7 +67,7 @@ def test_config_roundtrip_client_server(monkeypatch, tmp_path):
     assert isinstance(decoded2.content, ConfigFrame)
     assert len(decoded2.content.transport_parameters) == 2  # updated 2 TPs
 
-    changed2 = client.apply_transport(decoded2.content.tps_as_dict())
+    changed2 = client.update_peer(decoded2.content.tps_as_dict())
     assert changed2 is True
     assert client.transport_peer is not None
     assert client.transport_peer.max_datagram_frame_size == 2400

@@ -39,7 +39,7 @@ def _clear_tp_defaults_cache_if_any():
     # If your module caches TOML defaults, clear between tests
     if hasattr(cfg, "_tp_defaults_from_toml"):
         try:
-            cfg._tp_defaults_from_toml.cache_clear()  # type: ignore[attr-defined]
+            cfg.tp_defaults_from_toml.cache_clear()  # type: ignore[attr-defined]
         except Exception:
             pass
 

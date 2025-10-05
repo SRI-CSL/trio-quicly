@@ -12,8 +12,8 @@ from typing import *
 from .acks import PacketNumberSpace, SentPacket
 from .configuration import QuicConfiguration
 from .exceptions import QuicErrorCode
-from .frame import decode_var_length_int, encode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, TransportParameter, \
-    ConnectionCloseFrame, ACKFrame, NON_ACK_ELICITING_FRAME_TYPES, DatagramFrame
+from .frame import decode_var_length_int, encode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, \
+    TransportParameter, ConnectionCloseFrame, ACKFrame, NON_ACK_ELICITING_FRAME_TYPES, DatagramFrame
 from .logger import make_qlog
 from .packet import create_quic_packet, is_long_header, QuicPacketType, LongHeaderPacket, \
     MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicProtocolVersion, QuicPacket
@@ -93,6 +93,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         assert sending_ch is not None, "Cannot create QUIC connection without sending channel"
         self.sending_ch = sending_ch
         self._configuration = configuration
+        ACKFrame.set_local_ack_delay_exp(configuration.transport_local.ack_delay_exponent)
         self._is_client = configuration.is_client
         self.remote_address: AddressFormat = remote_address
         assert self.remote_address is not None
@@ -534,7 +535,8 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             self.state = ConnectionState.CLOSING if not self.is_closing else self.state
 
     def _handle_config(self, config_frame: ConfigFrame) -> bool:
-        return self.configuration.apply_transport(config_frame.tps_as_dict())
+        ACKFrame.set_peer_ack_delay_exp(exp=config_frame.tps_as_dict().get(0x0a))  # ack_delay_exponent of peer (if exists)
+        return self.configuration.update_peer(config_frame.tps_as_dict())
 
     async def on_rx(self, quic_packets: List[QuicPacket], remote_addr: NetworkAddress = None) -> None:
         """
