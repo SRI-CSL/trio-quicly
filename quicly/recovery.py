@@ -1,33 +1,29 @@
+from contextvars import ContextVar
 import math
 from typing import *
 
 from .acks import ack_to_intervals, SentPacket, PacketNumberSpace
+from .configuration import tp_defaults_from_toml
 from .frame import ACKFrame
 #from .congestion import cubic, reno  # noqa
 #from .congestion.base import K_GRANULARITY, create_congestion_control
 from .packet import QuicPacketType
-from .utils import K_MICRO_SECOND, K_GRANULARITY
+from .utils import K_MICRO_SECOND, K_GRANULARITY, K_MILLI_SECOND
 
 # loss detection TODO: move these into configuration!
 K_PACKET_THRESHOLD = 3      # RFC 9002: no smaller than 3
 K_TIME_THRESHOLD   = 9 / 8
 K_INITIAL_RTT      = 0.333  # 333 ms, per RFC 9002
 
+_PEER_MAX_ACK_DELAY_S: ContextVar[float] = ContextVar("_PEER_MAX_ACK_DELAY_S",
+                                                      default=tp_defaults_from_toml().max_ack_delay * K_MILLI_SECOND)
 
 class QuicPacketRecovery:
     """
     Packet loss detection and congestion controller.
     """
 
-    def __init__(
-        self,
-        # congestion_control_algorithm: str,
-        # initial_rtt: float,
-        # max_datagram_size: int,
-        peer_completed_address_validation: bool,
-        space: PacketNumberSpace,
-    ) -> None:
-        self.max_ack_delay = 0.025  # TODO: from config...
+    def __init__(self, peer_completed_address_validation: bool, space: PacketNumberSpace) -> None:
         self.peer_completed_address_validation = peer_completed_address_validation
         self.space = space
 
@@ -51,6 +47,16 @@ class QuicPacketRecovery:
     @property
     def bytes_in_flight(self) -> int:
         return self._bytes_in_flight
+
+    @classmethod
+    def set_peer_max_ack_delay(cls, max_ack_delay_ms: int | None = None) -> None:
+        # don't overwrite cur_peer with None: just keep old (potentially default) value
+        cur_peer = _PEER_MAX_ACK_DELAY_S.get()
+        _PEER_MAX_ACK_DELAY_S.set(cur_peer if max_ack_delay_ms is None else max_ack_delay_ms * K_MILLI_SECOND)
+
+    @classmethod
+    def _get_peer_max_ack_delay(cls) -> float:
+        return _PEER_MAX_ACK_DELAY_S.get()
 
     # @property
     # def congestion_window(self) -> int:
@@ -81,7 +87,7 @@ class QuicPacketRecovery:
     def get_probe_timeout(self) -> float:
         if not self._rtt_initialized:
             return 2 * self._rtt_initial
-        return self._rtt_smoothed + max(4 * self._rtt_variance, K_GRANULARITY) + self.max_ack_delay
+        return self._rtt_smoothed + max(4 * self._rtt_variance, K_GRANULARITY) + self._get_peer_max_ack_delay()
 
     def on_ack_received(self, ack: ACKFrame, phase: QuicPacketType, now: float) -> tuple[bool, bool]:
         """
@@ -137,8 +143,8 @@ class QuicPacketRecovery:
         if largest_acked == largest_newly_acked and largest_sent_time is not None:
             latest_rtt = max(now - largest_sent_time, K_GRANULARITY)
 
-            # limit ACK delay (in ms) to max_ack_delay (in s)
-            ack_delay = min(ack.ack_delay * K_MICRO_SECOND, self.max_ack_delay)  # cannot be < 1 ms
+            # limit ACK delay (in ms) to peer's max_ack_delay (in s)
+            ack_delay = min(ack.ack_delay * K_MICRO_SECOND, self._get_peer_max_ack_delay())  # cannot be < 1 ms
 
             # update RTT estimate:
             if self._rtt_latest < self._rtt_min:

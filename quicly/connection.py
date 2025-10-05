@@ -129,12 +129,8 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         self._pn_space = PacketNumberSpace()
         self._ack_timer = TrioTimer("client" if self._is_client else "server", self.send_acks, )
         # loss recovery
-        self._loss = QuicPacketRecovery(
-            # congestion_control_algorithm=configuration.congestion_control_algorithm,
-            # max_datagram_size=self._max_datagram_size,
-            peer_completed_address_validation=not self._is_client,
-            space=self._pn_space,
-        )
+        self._loss = QuicPacketRecovery(peer_completed_address_validation=not self._is_client,
+                                        space=self._pn_space)
 
         # allowing timer callbacks to trigger async transmissions:
         self.on_tx_send, self.on_tx_recv = trio.open_memory_channel(math.inf)  # buffer indefinitely
@@ -536,6 +532,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
     def _handle_config(self, config_frame: ConfigFrame) -> bool:
         ACKFrame.set_peer_ack_delay_exp(exp=config_frame.tps_as_dict().get(0x0a))  # ack_delay_exponent of peer (if exists)
+        QuicPacketRecovery.set_peer_max_ack_delay(max_ack_delay_ms=config_frame.tps_as_dict().get(0x0b))  # max_axk_delay of peer (if exists)
         return self.configuration.update_peer(config_frame.tps_as_dict())
 
     async def on_rx(self, quic_packets: List[QuicPacket], remote_addr: NetworkAddress = None) -> None:
@@ -637,7 +634,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             self._pn_space.last_successful_rx = trio.current_time()
 
             if ack_eliciting:
-                max_ack_delay = self.configuration.transport_local.max_ack_delay * K_MILLI_SECOND
+                max_ack_delay_s = self.configuration.transport_local.max_ack_delay * K_MILLI_SECOND
                 # An endpoint SHOULD generate and send an ACK frame without delay when it receives an ack-eliciting
                 # packet either: (1) when the received packet has a packet number less than another ack-eliciting
                 # packet that has been received, or (2) when the packet has a packet number larger than the
@@ -650,9 +647,9 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
                         qp.packet_number < self._pn_space.largest_ack_eliciting_pkt or
                         self._pn_space.largest_acked_packet < qp.packet_number - 2
                 ):
-                    max_ack_delay = 0
-                if max_ack_delay > 0:
-                    ack_deadline = trio.current_time() + max_ack_delay
+                    max_ack_delay_s = 0
+                if max_ack_delay_s > 0:
+                    ack_deadline = trio.current_time() + max_ack_delay_s
                     if ack_deadline < self._ack_timer.deadline:  # an unarmed timer has deadline == math.inf
                         self._ack_timer.set_timer_at(ack_deadline)
                 else:
