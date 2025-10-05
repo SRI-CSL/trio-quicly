@@ -96,7 +96,7 @@ async def quic_echo_server(
 
             server_config = QuicConfiguration(is_client=False, ipv6=ipv6)
             server_config.update_local(transport_parameters)
-            await nursery.start(server.serve, echo_handler, nursery, )
+            await nursery.start(server.serve, echo_handler, nursery, server_config, )
 
             yield server, server.socket.getsockname()
 

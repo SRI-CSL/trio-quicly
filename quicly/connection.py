@@ -603,13 +603,22 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
                     continue
 
                 if qf.frame_type in [QuicFrameType.DATAGRAM, QuicFrameType.DATAGRAM_WITH_LENGTH]:
-                    # An endpoint that
-                    # receives a DATAGRAM frame that is larger than the value it sent in its max_datagram_frame_size transport
-                    # parameter TODO: MUST terminate the connection with an error of type PROTOCOL_VIOLATION.
+                    # TODO: from RFC9221: An endpoint that receives a DATAGRAM frame when it has not indicated
+                    #  support via the transport parameter MUST terminate the connection with an error of type
+                    #  PROTOCOL_VIOLATION. Similarly, an endpoint that receives a DATAGRAM frame that is larger than
+                    #  the value it sent in its max_datagram_frame_size transport parameter MUST terminate the
+                    #  connection with an error of type PROTOCOL_VIOLATION.
                     df = cast(DatagramFrame, qf.content)
-                    if len(df.datagram_data) > self.configuration.transport_local.max_datagram_frame_size:
+                    local_max_frame_size = self.configuration.transport_local.max_datagram_frame_size
+                    if local_max_frame_size <= 0:
+                        # TODO: PROTOCOL_VIOLATION
+                        self._qlog.warn("DATAGRAM receiving not supported")
+                        await self.enter_closing()
+                        return
+                    if len(df.datagram_data) > local_max_frame_size:
+                        # TODO: PROTOCOL_VIOLATION
                         self._qlog.warn(f"Received DATAGRAM too big - PROTOCOL_VIOLATION!",
-                                        max_size=self.configuration.transport_local.max_datagram_frame_size)
+                                        max_size=local_max_frame_size)
                         await self.enter_closing()
                         return
                     await self._datagram_q.s.send(df.datagram_data)
@@ -655,11 +664,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
     # TODO: from RFC9221: An endpoint MUST NOT send DATAGRAM frames until it has received the max_datagram_frame_size
     #  transport parameter with a non-zero value during the handshake (or during a previous handshake if 0-RTT is
     #  used). An endpoint MUST NOT send DATAGRAM frames that are larger than the max_datagram_frame_size value it has
-    #  received from its peer. An endpoint that receives a DATAGRAM frame when it has not indicated support via the
-    #  transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION. Similarly,
-    #  an endpoint that receives a DATAGRAM frame that is larger than the value it sent in its max_datagram_frame_size
-    #  transport parameter MUST terminate the connection with an error of type PROTOCOL_VIOLATION.
-
+    #  received from its peer.
     async def send(self, value: bytes) -> None:
         """
         Implementation of `trio.abc.Channel[bytes].send()` to send DATAGRAM or DATAGRAM_WITH_LENGTH frames.
@@ -667,23 +672,24 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         :param value: data to be sent inside datagram frame
         """
         if self.state != ConnectionState.ESTABLISHED:
-            # TODO: PROTOCOL_VIOLATION?
             self._qlog.warn("Trying to send DATAGRAM on non-established connection", current_state=self.state)
-            raise ConnectionError(f"Connection not established for sending DATAGRAMs")
+            # TODO: signal that we dropped value and return?
+            raise RuntimeError(f"Connection not established for sending DATAGRAMs")
 
-        max_frame_size = self.configuration.transport_local.max_datagram_frame_size
-        if max_frame_size <= 0:
-            # TODO: PROTOCOL_VIOLATION?
-            self._qlog.warn("DATAGRAM sending not supported by peer")
-            raise RuntimeError("DATAGRAM sending not supported by peer")
+        peer_max_frame_size = self.configuration.transport_peer.max_datagram_frame_size
+        if peer_max_frame_size <= 0:
+            self._qlog.warn("DATAGRAM not supported by peer")
+            # TODO: signal that we dropped value and return?
+            raise RuntimeError("DATAGRAM not supported by peer")
 
         # TODO: we don't fragment but require that the application is sending
         #  chunks of < max_frame_size - 1 - len(length_varint)
+        # TODO: we also need to observe the Path MTU and configured total max_udp_payload_size here!
         encoded_length = encode_var_length_int(len(value))
-        if len(encoded_length) + len(value) >= max_frame_size:
-            # TODO: PROTOCOL_VIOLATION?
+        if len(encoded_length) + len(value) >= peer_max_frame_size:
             self._qlog.warn("DATAGRAM_WITH_LENGTH size exceeds negotiated frame size",
-                            size_max=max_frame_size, len_frame=1 + len(encoded_length) + len(value))
+                            size_max=peer_max_frame_size, len_frame=1 + len(encoded_length) + len(value))
+            # TODO: signal that we dropped value and return?
             raise RuntimeError("DATAGRAM_WITH_LENGTH size exceeds negotiated frame size")
         qpkt = self._build_quic_packet(QuicPacketType.ONE_RTT,
                                        destination_cid=self.peer_cid.cid,
@@ -701,13 +707,6 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         if self._closed:
             raise trio.ClosedResourceError("connection was already closed")
 
-        # An endpoint that receives a DATAGRAM frame when it has not indicated support via the transport parameter
-        # TODO: MUST terminate the connection with an error of type PROTOCOL_VIOLATION.
-        max_frame_size = self.configuration.transport_local.max_datagram_frame_size
-        if max_frame_size <= 0:
-            # TODO: PROTOCOL_VIOLATION?
-            self._qlog.warn("DATAGRAM receiving not supported")
-            raise RuntimeError("DATAGRAM receiving not supported")
         try:
             return await self._datagram_q.r.receive()
         except (trio.EndOfChannel, trio.ClosedResourceError):
