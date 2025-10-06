@@ -1,7 +1,7 @@
-#  Copyright ©  2025 SRI International.
+#  Copyright (c) 2025 SRI International.
 #  This work is licensed under CC BY-NC-ND 4.0 license.
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
-import math
+
 from dataclasses import dataclass, field, asdict, replace, is_dataclass, fields
 from functools import lru_cache
 from importlib.resources import files as ir_files  # py311+
