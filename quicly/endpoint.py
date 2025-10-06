@@ -220,6 +220,11 @@ class QuicEndpoint:
             self._qlog.debug(f"UDP datagram from known CID={hexdump(destination_cid)}", size=len(udp_payload))
             await destination.on_rx(list(decode_udp_packet(udp_payload, destination_cid)), remote_address)
 
+    def _config_logger(self, level: str | int):
+        for h in self._qlog.handlers:
+            if h.name == 'structlog-console':
+                h.setLevel("DEBUG")  # TODO: level)
+
     def dump_qlog(self):
         if isinstance(self._mem_qlog, QlogMemoryCollector):
             # TODO: make these persist as files...
@@ -288,6 +293,7 @@ class QuicServer(QuicEndpoint):
             server_configuration = QuicConfiguration(is_client=False)
         else:
             assert not server_configuration.is_client
+        self._config_logger(server_configuration.logging_level)
 
         try:
             task_status.started()
@@ -381,6 +387,7 @@ class QuicClient(QuicEndpoint):
             client_configuration = QuicConfiguration(is_client=True)
         else:
             assert client_configuration.is_client
+        self._config_logger(client_configuration.logging_level)
 
         async with trio.open_nursery() as nursery:
             self.start_endpoint(nursery)

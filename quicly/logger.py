@@ -45,7 +45,7 @@ config_dict = {
     },
     'handlers': {
         'structlog-console': {
-            'level': 'DEBUG',  # TODO: make this configurable
+            'level': 'DEBUG',
             'formatter': 'quicly-formatter',
             'class': 'logging.StreamHandler',
             'stream': 'ext://sys.stdout',  # Default is stderr
