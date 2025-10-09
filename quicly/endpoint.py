@@ -335,7 +335,7 @@ class QuicServer(QuicEndpoint):
                         await connection.on_rx(list(decode_udp_packet(payload, destination_cid)), remote_address)
                     else:
                         self._qlog.warn(f"Cannot serve UDP payload from NEW connection CID={hexdump(destination_cid)}"
-                                        f"in current state",
+                                        f" in current state",
                                         current_state=connection.state,
                                         dcid=hexdump(destination_cid),
                                         remote_addr=remote_address)
@@ -418,14 +418,13 @@ class QuicClient(QuicEndpoint):
                         break
 
             try:
-                if connection.is_closed or cancel_scope.cancelled_caught:
+                if cancel_scope.cancelled_caught:
                     self._qlog.warning(f"Could not establish QUIC connection to {target_address} - exiting.")
                     connection.peer_cid.cid = connection.host_cid  # we haven't established a valid peer address yet
                     timeout_frame = ConnectionCloseFrame(QuicErrorCode.NO_ERROR,
                                                          reason=b'Idle timeout during handshake reached.')
                     connection.send_closing([QuicFrame(QuicFrameType.TRANSPORT_CLOSE, content=timeout_frame)])
-                    # raise QuicProtocolError("Could not establish QUIC connection")
-                else:
+                elif not connection.is_closed:
                     yield connection  # give caller control; loops continue running in the nursery
             finally:
                 # on context exit: cancel everything cleanly

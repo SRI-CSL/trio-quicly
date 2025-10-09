@@ -346,8 +346,8 @@ class QuicConfiguration:
         # target == "peer"
         changed = False
         if self.transport_peer is None:
-            # Start from the current local as baseline for the peer
-            self.transport_peer = replace(self.transport_local)
+            # Start from the default values as baseline for the peer Linda: - fix after testing cancellation inside async gen!
+            self.transport_peer = replace(self.transport_local) #tp_defaults_from_toml()  #replace(self.transport_local)
             changed = True
 
         changed |= self.transport_peer.update(overrides)

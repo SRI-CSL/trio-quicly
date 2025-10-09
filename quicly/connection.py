@@ -14,7 +14,7 @@ from .acks import PacketNumberSpace, SentPacket
 from .configuration import QuicConfiguration
 from .exceptions import QuicErrorCode
 from .frame import decode_var_length_int, encode_var_length_int, QuicFrame, QuicFrameType, ConfigFrame, \
-    TransportParameter, ConnectionCloseFrame, ACKFrame, NON_ACK_ELICITING_FRAME_TYPES, DatagramFrame
+    TransportParameter, ConnectionCloseFrame, ACKFrame, NON_ACK_ELICITING_FRAME_TYPES, DatagramFrame, ACK_TYPES
 from .logger import make_qlog
 from .packet import create_quic_packet, is_long_header, QuicPacketType, LongHeaderPacket, \
     MAX_UDP_PACKET_SIZE, decode_udp_packet, QuicProtocolVersion, QuicPacket
@@ -207,8 +207,19 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
     async def aclose(self) -> None:
         """Close this connection, but asynchronously.
-        This is included to satisfy the `trio.abc.Stream` contract. It's identical to `close`, but async.
+        This is included to satisfy the `trio.abc.Stream` contract.
+        If called from ESTABLISHED, then send one more CONNECTION_CLOSE frame as application error.
+        Calls synchronous `close()` method at the end.
         """
+        if self.state == ConnectionState.ESTABLISHED:
+            # try to send one more CONNECTION_CLOSE if this is called from application level
+            close_frame = ConnectionCloseFrame(QuicErrorCode.APPLICATION_ERROR,
+                                               reason=b'aclose()')  # APP_CLOSE does not include frame type!
+            await self.on_tx(
+                self._build_quic_packet(QuicPacketType.ONE_RTT,
+                                        self.peer_cid.cid,
+                                        payload=[QuicFrame(QuicFrameType.APPLICATION_CLOSE, content=close_frame)]))
+
         self.close()
         await trio.lowlevel.checkpoint()
 
@@ -233,25 +244,24 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         nursery.start_soon(self._ack_timer.timer_loop, )
         nursery.start_soon(self._on_tx_loop, )
 
-    async def enter_closing(self) -> None:
-        if self.state == ConnectionState.ESTABLISHED:
-            # try to send one more CONNECTION_CLOSE:
-            close_frame = ConnectionCloseFrame(QuicErrorCode.APPLICATION_ERROR,
-                                               reason=b'aclose()')  # APP_CLOSE does not include frame type!
-            await self.on_tx(
-                self._build_quic_packet(QuicPacketType.ONE_RTT,
-                                        self.peer_cid.cid,
-                                        payload=[QuicFrame(QuicFrameType.APPLICATION_CLOSE, content=close_frame)]))
-        await self.aclose()
+    # async def enter_closing(self, send_close: bool = True) -> None:
+    #     if self.state == ConnectionState.ESTABLISHED and send_close:
+    #         # try to send one more CONNECTION_CLOSE if this is called from application level
+    #         close_frame = ConnectionCloseFrame(QuicErrorCode.APPLICATION_ERROR,
+    #                                            reason=b'aclose()')  # APP_CLOSE does not include frame type!
+    #         await self.on_tx(
+    #             self._build_quic_packet(QuicPacketType.ONE_RTT,
+    #                                     self.peer_cid.cid,
+    #                                     payload=[QuicFrame(QuicFrameType.APPLICATION_CLOSE, content=close_frame)]))
+    #     await self.aclose()
 
     def enter_draining(self) -> None:
         self.state = ConnectionState.DRAINING
         # cancel timers
         self._ack_timer.cancel()
         self._idle_timer.cancel()
-        self.pto_timer.cancel()
+        self.pto_timer.cancel()  # TODO: or re-arm and then exit()?
 
-    # TODO: consider integration with `self._build_quic_packet` (move from packet.py) to make sure to ONLY ever increase PN when calling this?
     def _build_quic_packet(self, packet_type: QuicPacketType, destination_cid: bytes, **kwargs) -> QuicPacket:
         def _get_and_incr_pn() -> int:
             next_pn = self._next_pn_tx
@@ -341,7 +351,29 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         return initial_pkt
 
     async def start_handshake(self, hello_payload: bytes, remote_address: NetworkAddress) -> bool:
+        """Try to perform the handshake from server-side.
+        Servers process the client's INITIAL packet and respond with their own INITIAL packet including an ACK for the
+        client's INITIAL and a CONFIG_ACK (with a possibly empty list of transport parameters).
+
+        TODO: move to on_rx() logic: In the second case,
+          they process the client's ONE_RTT packet including the ACK for one of their ack-eliciting INITIAL packets,
+          and then move into ESTABLISHED state.
+
+        It's safe to call this multiple times -- it only proceeds if the state is still LISTEN or ACCPET.
+        Once the server moved to ESTABLISHED (or beyond into closing states), this will be a no-op.
+
+        :param hello_payload: this encodes the client's INITIAL QuicPacket
+        :param remote_address: Start tracking the network path using the remote address from where we received the
+          hello packet.
+        """
         assert not self._is_client, "start_handshake() must only be called by server"
+
+        if self.state == ConnectionState.ESTABLISHED:
+            self._qlog.debug(f"start_handshake() called when connection ESTABLISHED: ignoring")
+            return True
+        if self.is_closing:
+            self._qlog.warn(f"start_handshake() called when connection is closing: ignoring")
+            return False
 
         try:
             initial_pkt = self._get_initial_pkt(hello_payload)
@@ -357,26 +389,21 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
         except AssertionError as ae:
             self._qlog.warn(f"start_handshake raised AssertionError: {ae}")
-            # TODO: turn assertion errors into PROTOCOL_VIOLATION?
             return False
         self.remote_address = remote_address  # potentially overwrite client's initial target address
         return True
 
     async def do_handshake(self, hello_payload: bytes, remote_address: NetworkAddress) -> bool:
-        """Try to perform the handshake.  Clients process the server's INITIAL response, creating a ONE_RTT with an
-        ACK for server's INITIAL and moving into the ESTABLISHED state.  Servers process the client's INITIAL or
-        ONE_RTT packet: in the first case responding with their own INITIAL packet including an ACK for the
-        client's INITIAL and a CONFIG_ACK (with a possibly empty list of transport parameters).  In the second case,
-        they process the client's ONE_RTT packet including the ACK for one of their ack-eliciting INITIAL packets,
-        and then move into ESTABLISHED state.
+        """Try to perform the handshake from client-side.
+        Clients process the server's INITIAL response and create a ONE_RTT with an ACK for server's INITIAL.
+        Once the server's expected ACK in the hello payload's INITIAL packet has been processed and it matches a
+        former client INITIAL packet, then move into the ESTABLISHED state.
 
-        It's safe to call this multiple times – the server has to to process INITIAL and later ONE_RTT.  Once
-        ESTABLISHED, this will be a no-op.
+        It's safe to call this multiple times. Once ESTABLISHED, this will be a no-op.  If moved already into closing
+        states, then also return immediately.
 
-        :param hello_payload: this encodes the INITIAL QuicPacket; if we are the client side, then the destination
-          connection ID from the payload should match our source CID.
-          TODO: how to react if it doesn't match?
-          If we are the server, then we are about to respond with our INITIAL QuicPacket.
+        :param hello_payload: this encodes the server's INITIAL QuicPacket; the destination connection ID from the
+          payload should match our source CID. TODO: how to react if it doesn't match?
         :param remote_address: Start tracking the network path using the remote address from where we received the
           hello packet.
         """
@@ -385,6 +412,9 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         if self.state == ConnectionState.ESTABLISHED:
             self._qlog.debug(f"do_handshake() called when connection ESTABLISHED: ignoring")
             return True
+        if self.is_closing:
+            self._qlog.warn(f"do_handshake() called when connection is closing: ignoring")
+            return False
 
         try:
             initial_pkt = self._get_initial_pkt(hello_payload)
@@ -394,7 +424,6 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
         except AssertionError as ae:
             self._qlog.warn(f"do_handshake raised AssertionError: {ae}")
-            # TODO: turn assertion errors into PROTOCOL_VIOLATION?
             return False
         self.remote_address = remote_address  # potentially overwrite client's initial target address
         return True
@@ -542,11 +571,6 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         """
         self._qlog.info(f"*** on_rx() from {remote_addr}", pkts=quic_packets)
 
-        if self.is_closing:
-            self._qlog.warning(f"Connection to {remote_addr} already closing - dropping QUIC packets",
-                               n_new_packets=len(quic_packets))
-            return
-
         # TODO: check network path with `remote_addr`
 
         for qp in quic_packets:
@@ -569,7 +593,8 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
             configuration_updated = False
             add_payload_to_ack = []  # only if ACK'ing immediately
             new_ack_encountered = False
-            for qf in qp.payload:
+            # TODO: parse ACK frames first (to allow entering ESTABLISHED at the earliest!)
+            for qf in sorted(qp.payload, key=lambda f: f.frame_type not in ACK_TYPES):
                 if qf.frame_type not in NON_ACK_ELICITING_FRAME_TYPES:
                     ack_eliciting = True
                     self._pn_space.largest_ack_eliciting_pkt = qp.packet_number
@@ -588,6 +613,13 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
                     """The draining state is entered once an endpoint receives a CONNECTION_CLOSE frame, 
                     which indicates that its peer is closing or draining. While otherwise identical to the closing 
                     state, an endpoint in the draining state MUST NOT send any packets."""
+                    if self.state == ConnectionState.ESTABLISHED:
+                        # send one CONNECTION_CLOSE frame back:
+                        close_reply = ConnectionCloseFrame(QuicErrorCode.NO_ERROR, b'')
+                        await self.on_tx(
+                            self._build_quic_packet(QuicPacketType.ONE_RTT,
+                                                    self.peer_cid.cid,
+                                                    payload=[QuicFrame(qf.frame_type, content=close_reply)]))
                     self.enter_draining()
 
                 if qf.frame_type in [QuicFrameType.CONFIG, QuicFrameType.CONFIG_ACK]:
@@ -609,15 +641,19 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
                     df = cast(DatagramFrame, qf.content)
                     local_max_frame_size = self.configuration.transport_local.max_datagram_frame_size
                     if local_max_frame_size <= 0:
-                        # TODO: PROTOCOL_VIOLATION
                         self._qlog.warn("DATAGRAM receiving not supported")
-                        await self.enter_closing()
+                        error_frame = ConnectionCloseFrame(QuicErrorCode.PROTOCOL_VIOLATION,
+                                                           reason=b'DATAGRAM receiving not supported.',
+                                                           frame_type=qf.frame_type)
+                        self.send_closing([QuicFrame(QuicFrameType.TRANSPORT_CLOSE, content=error_frame)])
                         return
-                    if len(df.datagram_data) > local_max_frame_size:
-                        # TODO: PROTOCOL_VIOLATION
-                        self._qlog.warn(f"Received DATAGRAM too big - PROTOCOL_VIOLATION!",
-                                        max_size=local_max_frame_size)
-                        await self.enter_closing()
+                    frame_size = len(qf.encode())
+                    if frame_size > local_max_frame_size:
+                        self._qlog.warn(f"Received DATAGRAM too big ({frame_size} B)", max_size=local_max_frame_size)
+                        error_frame = ConnectionCloseFrame(QuicErrorCode.PROTOCOL_VIOLATION,
+                                                           reason=b'Received DATAGRAM too big.',
+                                                           frame_type=qf.frame_type)
+                        self.send_closing([QuicFrame(QuicFrameType.TRANSPORT_CLOSE, content=error_frame)])
                         return
                     await self._datagram_q.s.send(df.datagram_data)
 
@@ -657,6 +693,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
                     self.send_acks(qp.packet_type, add_payload_to_ack)  # initiate on_tx() immediately!
 
             if self.state == ConnectionState.DRAINING:
+                self._qlog.info(f"In state DRAINING, so initiating aclose()")
                 await self.aclose()
 
     # TODO: from RFC9221: An endpoint MUST NOT send DATAGRAM frames until it has received the max_datagram_frame_size

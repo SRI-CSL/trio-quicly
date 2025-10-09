@@ -125,6 +125,40 @@ async def test_smoke_datagram(ipv6: bool = False) -> None:
 
 # TODO: test_fast_start (sending bytes with INITIAL...)
 
+async def test_one_sided_datagram1(ipv6: bool = False) -> None:
+    transport_parameters = {"max_datagram_frame_size" : 2400}  # add DATAGRAM support
+    async with quic_echo_server(True, ipv6=ipv6, delay=0,
+                                transport_parameters=transport_parameters) as (_server_endpoint, address):
+        with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
+            client = cast(QuicClient, client_endpoint)
+            client_config = QuicConfiguration(is_client=True, ipv6=ipv6)
+            client_config.update_local(transport_parameters)
+            async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
+                                      client_config) as connection:
+                assert connection.state == ConnectionState.ESTABLISHED
+                await trio.sleep(0.1)  # let handshake finalize for server
+                # server changes to not supporting DATAGRAM:
+                server = cast(QuicServer, _server_endpoint)
+                assert connection.host_cid in server._connections.keys()
+                server_connection = server._connections[connection.host_cid]
+                assert server_connection.state == ConnectionState.ESTABLISHED
+                server_connection.configuration.update_local({"max_datagram_frame_size" : 0})
+                await connection.send(b"hello")
+                # TODO: PROTOCOL_VIOLATION!
+                await trio.sleep_forever() # let server close connection with PROTOCOL_VIOLATION
+
+async def test_one_sided_datagram2(ipv6: bool = False) -> None:
+    # server does not support DATAGRAM:
+    async with quic_echo_server(True, ipv6=ipv6, delay=0) as (_server_endpoint, address):
+        with local_endpoint(ipv6=ipv6, is_client=True) as client_endpoint:
+            client = cast(QuicClient, client_endpoint)
+            client_config = QuicConfiguration(is_client=True, ipv6=ipv6)
+            client_config.update_local({"max_datagram_frame_size" : 2400})
+            async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
+                                      client_config) as connection:
+                await connection.send(b"hello")
+                await trio.sleep(1) # let server close connection with PROTOCOL_VIOLATION
+
 # TODO: @parametrize_ipv6, also remove = False default below
 async def test_handshake_datagram(ipv6: bool = False) -> None:
     transport_parameters = {"max_datagram_frame_size" : 2400}  # add DATAGRAM support

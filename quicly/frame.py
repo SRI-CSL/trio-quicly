@@ -143,6 +143,13 @@ NON_ACK_ELICITING_FRAME_TYPES = frozenset(
         QuicFrameType.APPLICATION_CLOSE,
     ]
 )
+ACK_TYPES = frozenset(
+    [
+        QuicFrameType.ACK,
+        QuicFrameType.ACK_ECN,
+    ]
+)
+
 # NON_IN_FLIGHT_FRAME_TYPES = frozenset(
 #     [
 #         QuicFrameType.ACK,

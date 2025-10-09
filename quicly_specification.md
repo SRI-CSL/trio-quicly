@@ -461,21 +461,27 @@ parse_config(bytes):
 
 # Appendix B. Minimal State Machines
 
-**Client states:** `START → WAIT_FIRST → ESTABLISHED → CLOSING → DRAINING`
+**Client states:** `LISTEN → ESTABLISHED → CLOSING → DRAINING`
 
-START: Send Initial (ver=`0x51554c59`) with CONFIG frame (potentially empty), optional application data (STREAM or DATAGRAM frames), and padding to the configured target; enter `WAIT_FIRST`.
+LISTEN: Send Initial (ver=`0x51554c59`) with CONFIG frame (potentially empty), optional application data (STREAM or DATAGRAM frames), and padding to the configured target.
+On receiving server ACK of the Initial (with CONFIG-ACK, possibly empty), apply parameters and enter `ESTABLISHED`. Ignore any Version Negotiation. 
+On receiving CONNECTION_CLOSE, enter `DRAINING`.
 
-WAIT_FIRST: On receiving server ACK of the Initial (CONFIG-ACK, possibly empty), apply parameters and enter `ESTABLISHED`. Ignore any Version Negotiation. On receiving CONNECTION_CLOSE, enter `DRAINING`.
+**Server states:** `LISTEN → ACCEPT → ESTABLISHED → CLOSING → DRAINING`
 
-ESTABLISHED: Use Short Header packets with STREAM/ACK/flow control. When application wants to close, send CONNECTION_CLOSE frame and enter `CLOSING`.
+LISTEN: On client Initial (ver=`0x51554c59`), parse CONFIG (if any), respond with ACK and CONFIG-ACK (possibly empty); enter `ACCEPT`.
 
-CLOSING: On receiving CONNECTIONC_CLOSE, enter `DRAINING`.
+ACCEPT: On receiving first ACK for server's Initial, move to `ESTABLISHED`.
 
-**Server states:** `LISTEN → ESTABLISHED → CLOSING → DRAINING`
+**Common states to both, client and server:**
 
-LISTEN: On client Initial (ver=`0x51554c59`), parse CONFIG (if any), respond with ACK and CONFIG-ACK (possibly empty); enter `ESTABLISHED`.
+ESTABLISHED: Normal operation (Short Header packets) until endpoint initiates closing by sending CONNECTION_CLOSE, then enter `CLOSING`, 
+or until receiving CONNECTION_CLOSE, then sned CONNCETION_CLOSE before entering `DRAINING`.
 
-ESTABLISHED: Normal operation until server initiates closing by sending CONNECTION_CLOSE, enter `CLOSING`, or until receiving CONNECTION_CLOSE, then enter `DRAINING`.
+CLOSING: On receiving CONNECTIONC_CLOSE and if not already in `DRAINING`, enter `DRAINING`.  
+After short timeout (3x PTO?) enter `DRAINING` (without sending)?
+
+DRAINING: No more packets sent.  After short timeout (3x PTO?) exit connection???
 
 # Appendix C. Interoperability Notes
 
