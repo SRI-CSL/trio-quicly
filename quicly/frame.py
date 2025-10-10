@@ -149,6 +149,14 @@ ACK_TYPES = frozenset(
         QuicFrameType.ACK_ECN,
     ]
 )
+APP_DATA_FRAMES = frozenset(
+    [
+        QuicFrameType.DATAGRAM,
+        QuicFrameType.DATAGRAM_WITH_LENGTH,
+        QuicFrameType.STREAM_BASE,
+        # TODO: more?
+    ]
+)
 
 # NON_IN_FLIGHT_FRAME_TYPES = frozenset(
 #     [

@@ -7,7 +7,7 @@ from itertools import count
 import sys
 import trio
 
-from configuration import QuicConfiguration, update_config
+from quicly.configuration import QuicConfiguration
 from quicly.connection import SimpleQuicConnection
 from quicly.server import serve_quic
 
@@ -43,7 +43,7 @@ async def echo_handler(server_channel: SimpleQuicConnection) -> None:
 
 async def main():
     server_config = QuicConfiguration(is_client=False)
-    update_config(server_config, transport_parameters={"max_datagram_frame_size": 1200})
+    server_config.update_local({"max_datagram_frame_size": 1200})
     await serve_quic(echo_handler, PORT, configuration=server_config)  #host="::")  # or or "0.0.0.0"
 
 # We could also just write 'trio.run(trio.serve_tcp, echo_server, PORT)', but real

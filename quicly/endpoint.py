@@ -299,7 +299,7 @@ class QuicServer(QuicEndpoint):
             task_status.started()
 
             async def handle_connection(new_connection: SimpleQuicConnection) -> None:
-                with new_connection:
+                async with new_connection:
                     await handler(new_connection, *args)
                 # TODO: if we end up here, we should remove the connection from the endpoint's list!
 
@@ -366,12 +366,9 @@ class QuicClient(QuicEndpoint):
         is based on UDP, we cannot reliably resolve the remote address until after receiving
         the first reply.
 
-        If this endpoint already manages a (prior) connection to the same remote address,
-        it will return the old connection after checking that it isn't closed.
-
-        TODO: For simplicity, a client can only support 1 QUIC connection.  Therefore, if this
+        TODO: For now, a client can only support 1 QUIC connection.  Therefore, if this
          method is called multiple times and to different destination addresses, it will
-         silently fail...
+         silently fail...?
 
         Args:
           target_address: The address to connect to. Usually a (host, port) tuple, like
@@ -389,45 +386,55 @@ class QuicClient(QuicEndpoint):
             assert client_configuration.is_client
         self._config_logger(client_configuration.logging_level)
 
-        async with trio.open_nursery() as nursery:
-            self.start_endpoint(nursery)
-            self._qlog.info(f"Trying to connect to {target_address}")
+        with trio.CancelScope() as lifetime:
+            # this allows for all child tasks spawned from this nursery to cleanly exit once connection closes
+            async with trio.open_nursery() as nursery:
+                self.start_endpoint(nursery)
+                self._qlog.info(f"Trying to connect to {target_address}")
 
-            connection = SimpleQuicConnection(self._send_q.s.clone(),
-                                              target_address,
-                                              self.connection_id_length,
-                                              self.incoming_packets_buffer,
-                                              configuration=client_configuration)
-            connection.start_background(nursery)
+                connection = SimpleQuicConnection(self._send_q.s.clone(),
+                                                  target_address,
+                                                  self.connection_id_length,
+                                                  self.incoming_packets_buffer,
+                                                  configuration=client_configuration)
+                connection.start_background(nursery)
 
-            # we don't yet have the advertised max_idle_timeout from peer,
-            # so the effective value here is the locally configured one:
-            idle_timeout_s = connection.configuration.effective_max_idle_timeout * K_MILLI_SECOND
-            with trio.move_on_after(idle_timeout_s if idle_timeout_s > 0 else math.inf) as cancel_scope:
-                initial_pkt = connection.init_handshake()
-                await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed
-                async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
-                    if await connection.do_handshake(payload, remote_address):
-                        assert connection.peer_cid.cid == destination_cid
-                    # else: handshake unsuccessful: PTO timer will handle re-transmit of INITIAL (as probe)
+                # we don't yet have the advertised max_idle_timeout from peer,
+                # so the effective value here will be the locally configured one:
+                idle_timeout_s = connection.configuration.effective_max_idle_timeout * K_MILLI_SECOND
+                with trio.move_on_after(idle_timeout_s if idle_timeout_s > 0 else math.inf) as cancel_scope:
+                    initial_pkt = connection.init_handshake()
+                    await connection.on_tx(initial_pkt)  # this arms PTO timer to re-transmit INITIAL if needed
+                    async for (payload, remote_address, destination_cid) in self._new_connections_q.r:
+                        if await connection.do_handshake(payload, remote_address):
+                            assert connection.peer_cid.cid == destination_cid
+                        # else: handshake unsuccessful: PTO timer will handle re-transmit of INITIAL (as probe)
 
-                    if connection.state == ConnectionState.ESTABLISHED:
-                        self._qlog.info(f"Connected to {remote_address}")
-                        self._connections[connection.host_cid] = connection  # clients only use 1 connection
-                        # now datagrams will be delivered directly to this connection!
-                        break
+                        if connection.state == ConnectionState.ESTABLISHED:
+                            self._qlog.info(f"Connected to {remote_address}")
+                            self._connections[connection.host_cid] = connection  # clients only use 1 connection
+                            # now datagrams will be delivered directly to this connection!
+                            break
 
-            try:
-                if cancel_scope.cancelled_caught:
-                    self._qlog.warning(f"Could not establish QUIC connection to {target_address} - exiting.")
-                    connection.peer_cid.cid = connection.host_cid  # we haven't established a valid peer address yet
-                    timeout_frame = ConnectionCloseFrame(QuicErrorCode.NO_ERROR,
-                                                         reason=b'Idle timeout during handshake reached.')
-                    connection.send_closing([QuicFrame(QuicFrameType.TRANSPORT_CLOSE, content=timeout_frame)])
-                elif not connection.is_closed:
-                    yield connection  # give caller control; loops continue running in the nursery
-            finally:
-                # on context exit: cancel everything cleanly
-                nursery.cancel_scope.cancel()
-                await connection.aclose()
-                self.dump_qlog()
+                # we either have an ESTABLISHED connection now or something went wrong:
+                try:
+                    if cancel_scope.cancelled_caught:
+                        self._qlog.warning(f"Could not establish QUIC connection to {target_address} - exiting.")
+                        connection.peer_cid.cid = connection.host_cid  # we haven't established a valid peer address yet
+                        await connection.enter_closing(
+                            QuicFrame(
+                                QuicFrameType.TRANSPORT_CLOSE,
+                                content=ConnectionCloseFrame(QuicErrorCode.NO_ERROR,
+                                                             reason=b'Idle timeout during handshake reached.')))
+                    elif not connection.is_closed:
+                        async def watch_state():
+                            await connection.draining_event.wait()
+                            lifetime.cancel()  # exit context now: will jump to finally: block below
+                        nursery.start_soon(watch_state, )
+
+                        yield connection  # give caller control; loops continue running in the nursery
+                finally:
+                    # on context exit: cancel everything cleanly
+                    nursery.cancel_scope.cancel()
+                    await connection.aclose()
+                    self.dump_qlog()

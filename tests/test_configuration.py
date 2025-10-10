@@ -36,15 +36,6 @@ def _write_transport_defaults(tmp_path, body=DEFAULTS_TP):
     return p
 
 
-def _clear_tp_defaults_cache_if_any():
-    # If your module caches TOML defaults, clear between tests
-    if hasattr(cfg, "_tp_defaults_from_toml"):
-        try:
-            cfg.tp_defaults_from_toml.cache_clear()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-
 def test_load_defaults_only(monkeypatch, tmp_path):
     """
     With only the version-controlled transport_defaults.toml present,
@@ -55,7 +46,6 @@ def test_load_defaults_only(monkeypatch, tmp_path):
     """
     monkeypatch.chdir(tmp_path)
     _write_transport_defaults(tmp_path)
-    _clear_tp_defaults_cache_if_any()
 
     conf = cfg.QuicConfiguration.load()
 
@@ -82,7 +72,6 @@ def test_load_with_toml_file_top_and_transport(monkeypatch, tmp_path):
     """
     monkeypatch.chdir(tmp_path)
     _write_transport_defaults(tmp_path)
-    _clear_tp_defaults_cache_if_any()
 
     config_toml = tmp_path / "quicly_config.toml"
     config_toml.write_text(textwrap.dedent("""
@@ -125,7 +114,6 @@ def test_env_overrides_applied(monkeypatch, tmp_path):
     """
     monkeypatch.chdir(tmp_path)
     _write_transport_defaults(tmp_path)
-    _clear_tp_defaults_cache_if_any()
 
     # Top-level ENV
     monkeypatch.setenv("QUICKLY__LOGGING_LEVEL", "WARNING")
@@ -154,7 +142,6 @@ def test_precedence_toml_then_env_then_runtime(monkeypatch, tmp_path):
     """
     monkeypatch.chdir(tmp_path)
     _write_transport_defaults(tmp_path)
-    _clear_tp_defaults_cache_if_any()
 
     # TOML file sets DEBUG + transport values
     config_toml = tmp_path / "quicly_config.toml"

@@ -144,13 +144,6 @@ def test_config_from_files_and_env(tmp_path, monkeypatch):
     monkeypatch.setenv("QUICLY_TP__DISABLE_ACTIVE_MIGRATION", "true")
     monkeypatch.setenv("QUICLY_TP__MAX_DATAGRAM_FRAME_SIZE", "1200")
 
-    # (if you memoize defaults inside the module, clear the cache per test run)
-    if hasattr(cfg, "_tp_defaults_from_toml"):
-        try:
-            cfg.tp_defaults_from_toml.cache_clear()  # lru_cache safety
-        except Exception:
-            pass
-
     # 4) load using explicit paths (recommended; avoids surprises)
     tp = cfg.load_transport_parameters(
         defaults_path=str(defaults_path),

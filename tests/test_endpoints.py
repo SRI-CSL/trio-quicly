@@ -82,17 +82,16 @@ async def quic_echo_server(
                     # print("server finished do_handshake")
                     # TODO: if DATAGRAM supported, use channel semantics, otherwise stream semantics:
                     if server_channel.configuration.transport_local.max_datagram_frame_size:
-                        async for packet in server_channel:
-                            # print(f"echoing {packet!r} -> {server_stream.remote_address!r}")
+                        async for payload in server_channel:
                             await trio.sleep(delay)
-                            await server_channel.send(packet)
+                            await server_channel.send(payload)
                     else:
-                        async for packet in server_channel.iter_stream_chunks():
-                            # print(f"echoing {packet!r} -> {server_stream.remote_address!r}")
-                            await trio.sleep(delay)
-                            await server_channel.send_all(packet)
+                        async with server_channel.iter_stream_chunks() as recv_chan:
+                            async for payload in recv_chan:
+                                await trio.sleep(delay)
+                                await server_channel.send_all(payload)
                 except trio.BrokenResourceError:  # pragma: no cover
-                    print("echo handler channel broken")
+                    print("echo handler channel/stream broken")
 
             server_config = QuicConfiguration(is_client=False, ipv6=ipv6)
             server_config.update_local(transport_parameters)
@@ -171,13 +170,19 @@ async def test_handshake_datagram(ipv6: bool = False) -> None:
             async with client.connect((get_localhost(ipv6, use_wildcard=False),) + address[1:],
                                       client_config) as connection:
                 assert connection.state == ConnectionState.ESTABLISHED
-                await trio.sleep(0.1)  # let handshake finalize for server
+                await trio.sleep(0)  # let handshake finalize for server
                 server = cast(QuicServer, _server_endpoint)
                 assert connection.host_cid in server._connections.keys()
                 server_connection = server._connections[connection.host_cid]
                 assert server_connection.state == ConnectionState.ESTABLISHED
-            await trio.sleep(0.5)  # let closing() commence?
-            print(f"client state: {connection.state}")
+            # Linda: why not called upon leaving async context manager???
+            # await connection.aclose()
+
+            # await trio.sleep(0)  # let closing() commence?
+            print(f"1st client state: {connection.state}")
+            await trio.sleep(1)  # let closing() commence?
+        print(f"2nd client state: {connection.state}")
+        await trio.sleep(0)  # let closing() commence?
 
             # TODO: check cleanly shutdown?
 

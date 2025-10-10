@@ -8,7 +8,7 @@ import sys
 import random
 import trio
 
-from quicly.configuration import QuicConfiguration, update_config
+from quicly.configuration import QuicConfiguration
 from quicly.client import open_quic_connection
 from quicly.connection import SimpleQuicConnection
 
@@ -47,7 +47,7 @@ N_TRANSMISSIONS = 3
 async def parent(num: int = 0):
     host = "127.0.0.1"  # "127.0.0.1" or "0.0.0.0"  # "::1" but never wildcard address "::"
     client_config = QuicConfiguration(is_client=True)
-    update_config(client_config, transport_parameters={"max_datagram_frame_size": 1200})
+    client_config.update_local({"max_datagram_frame_size": 1200})
 
     async with open_quic_connection(host, PORT, configuration=client_config) as client_conn:
         print(f'Starting client {num}')

@@ -195,7 +195,7 @@ async def serve_quic(
     # modeled after `trio.serve_listeners`:
     async with trio.open_nursery() as nursery:
         for server in servers:
-            nursery.start_soon(server.serve, connection_handler, handler_nursery, *args)
+            nursery.start_soon(server.serve, connection_handler, handler_nursery, server_configuration, *args)
         # The listeners are already queueing connections when we're called,
         # but we wait until the end to call started() just in case we get an error.
         task_status.started(servers)

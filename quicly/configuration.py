@@ -3,7 +3,6 @@
 #  To view a copy of this license, visit https://creativecommons.org/licenses/by-nc-nd/4.0/
 
 from dataclasses import dataclass, field, asdict, replace, is_dataclass, fields
-from functools import lru_cache
 from importlib.resources import files as ir_files  # py311+
 import os
 from pathlib import Path
@@ -262,10 +261,8 @@ def load_transport_parameters(
 
     return TransportParameters(**cfg)
 
-
-@lru_cache(maxsize=1)
-def tp_defaults_from_toml(path: str = "transport_defaults.toml") -> "TransportParameters":
-    d = _load_toml(path)
+def tp_defaults_from_toml() -> "TransportParameters":
+    d = _load_toml("transport_defaults.toml")
     # accept either a flat file or a [transport] table
     cfg = d.get("transport", d)
     return TransportParameters(**cfg)
@@ -347,7 +344,7 @@ class QuicConfiguration:
         changed = False
         if self.transport_peer is None:
             # Start from the default values as baseline for the peer Linda: - fix after testing cancellation inside async gen!
-            self.transport_peer = replace(self.transport_local) #tp_defaults_from_toml()  #replace(self.transport_local)
+            self.transport_peer = tp_defaults_from_toml()  #replace(self.transport_local) #
             changed = True
 
         changed |= self.transport_peer.update(overrides)
