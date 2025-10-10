@@ -376,21 +376,18 @@ If an endpoint initiates close at any time, it sends CONNECTION_CLOSE, enters CL
 sends no new application data. During CLOSING it MAY retransmit CONNECTION_CLOSE in response to
 incoming ack-eliciting packets. After a short deadline (e.g., 3 × PTO), it MUST enter
 DRAINING and send nothing further. If an endpoint receives a CONNECTION_CLOSE at any time,
-it MUST immediately enter DRAINING and send nothing further until the drain period ends.
+it SHOULD send CONNECTION_CLOSE and then MUST immediately enter DRAINING and send nothing further until the 
+drain period ends.
+
+QUIC-LY reuses QUIC Transport error codes where applicable for the details in the CONNECTION_CLOSE frame. 
+
+When the connection encounters PROTOCOL_VIOLATION situations or other errors that make the connection unusable, 
+it SHOULD send CONNECTION_CLOSE (with an appropriate error code) and enter DRAINING.
 
 ## Idle Timeout
 
 Independently of the above, if no ack-eliciting packets are received for longer than
 `idle_timeout_ms`, the endpoint MAY silently close the connection.
-
-# Error Handling
-
-QUIC-LY reuses QUIC Transport error codes where applicable. The following additional error codes are defined for CONNECTION_CLOSE (and potentially application close), encoded as QUIC varints:
-
-* `QUICLY_MALFORMED_CONFIG (0xface01)`: The CONFIG or CONFIG-ACK frame is not well-formed or violates encoding rules.
-* `QUICLY_UNSUPPORTED_PARAM (0xface02)`: A required parameter is unsupported by the peer.
-
-Endpoints MUST ignore unknown CONFIG parameters and only fail the connection when a required parameter is missing or invalid by local policy.
 
 # Security Considerations
 
