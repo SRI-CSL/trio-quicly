@@ -178,15 +178,16 @@ class QuicEndpoint:
             )
 
     def close(self) -> None:
-        """Close this socket, and all associated QUIC connections.
-        This object can also be used as a context manager.
+        """
+        Close this socket, and all associated QUIC connections.
+        This object can also be used as a context manager as it implements __enter__ and __exit__.
         """
         self._closed = True
-        self.socket.close()
-        for stream in list(self._connections.values()):
-            stream.close()
+        for connection in list(self._connections.values()):
+            connection.close()
         self._new_connections_q.r.close()  # alerts anyone waiting on receive(), e.g., the server or client handshake
         self._send_q.r.close()
+        self.socket.close()
         self.dump_qlog()
 
     def __enter__(self) -> Self:
@@ -217,13 +218,13 @@ class QuicEndpoint:
             # connection for this DCID not yet established:
             await self._new_connections_q.s.send((udp_payload, remote_address, destination_cid))
         else:
-            self._qlog.debug(f"UDP datagram from known CID={hexdump(destination_cid)}", size=len(udp_payload))
+            # self._qlog.debug(f"UDP datagram from known CID={hexdump(destination_cid)}", size=len(udp_payload))
             await destination.on_rx(list(decode_udp_packet(udp_payload, destination_cid)), remote_address)
 
     def _config_logger(self, level: str | int):
         for h in self._qlog.handlers:
             if h.name == 'structlog-console':
-                h.setLevel("DEBUG")  # TODO: level)
+                h.setLevel("DEBUG")  # TODO: level)  Linda: replace!
 
     def dump_qlog(self):
         if isinstance(self._mem_qlog, QlogMemoryCollector):
@@ -301,7 +302,7 @@ class QuicServer(QuicEndpoint):
             async def handle_connection(new_connection: SimpleQuicConnection) -> None:
                 async with new_connection:
                     await handler(new_connection, *args)
-                # TODO: if we end up here, we should remove the connection from the endpoint's list!
+                # TODO: if we end up here, we should remove the connection from the endpoint's list!?
 
             async with trio.open_nursery() as nursery:
                 self.start_endpoint(nursery)
@@ -435,6 +436,12 @@ class QuicClient(QuicEndpoint):
                         yield connection  # give caller control; loops continue running in the nursery
                 finally:
                     # on context exit: cancel everything cleanly
+                    await connection.enter_closing(
+                        QuicFrame(
+                            QuicFrameType.APPLICATION_CLOSE,
+                            content=ConnectionCloseFrame(
+                                QuicErrorCode.NO_ERROR,
+                                reason=b'finally block'))
+                        if connection.state == ConnectionState.ESTABLISHED else None)
                     nursery.cancel_scope.cancel()
-                    await connection.aclose()
                     self.dump_qlog()

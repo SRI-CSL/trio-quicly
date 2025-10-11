@@ -66,7 +66,7 @@ async def parent(num: int = 0):
             data = await client_conn.receive()
             print(f"receiver: got data {data!r}")
 
-    print(f'Stopping client {num}')
+    print(f'Stopping client {num} in state={client_conn.state}')
 
 
 async def two_clients():

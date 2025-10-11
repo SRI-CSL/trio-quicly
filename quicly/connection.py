@@ -174,15 +174,14 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
         if self._closed:
             return
         self._closed = True
-        # TODO: cancel timers?
+        # close and clean up resources:
         self.on_tx_recv.close()
         self.sending_ch.close()
-        # TODO: how to communicate to Endpoint?
-        # if self.endpoint.connections.get(self.remote_address) is self:
-        #     del self.endpoint.connections[self.remote_address]
-        # Will wake any tasks waiting on self.q.r.receive() with a ClosedResourceError:
         self._stream_q.r.close()
         self._datagram_q.r.close()
+        # TODO: how to communicate to Endpoint so that they can clean up?
+        # if self.endpoint.connections.get(self.remote_address) is self:
+        #     del self.endpoint.connections[self.remote_address]
 
     async def aclose(self) -> None:
         """
@@ -209,7 +208,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
 
     async def __anext__(self):
         # using this object to iterate asynchronously uses ReceiveChannel semantics (DATAGRAM frames).
-        # `iter_stream_chunks()` is the async iterator for ReceiveStream semantics (STREAM frames).
+        # `aiter_stream_chunks()` is the async iterator for ReceiveStream semantics (STREAM frames).
         # TODO: we could also switch to ReceiveStream if DATAGRAM are not supported by local transport parameters?
         try:
             return await self.receive()  # ← Channel semantics instead of Stream!
@@ -219,7 +218,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
     # TODO: this is only needed while Connection inherits both, ReceiveChannel and ReceiveStream:
     # TODO: use @as_safe_channel decorator?
     @trio.as_safe_channel
-    async def iter_stream_chunks(self, max_bytes: int | None = None):
+    async def aiter_stream_chunks(self, max_bytes: int | None = None):
         # since we direct `__anext__` above to use the channel receive semantics, if one wanted to use STREAM method
         # receive_some() in an async for loop, use this generator function
         while True:
@@ -445,7 +444,7 @@ class SimpleQuicConnection(trio.abc.Channel[bytes], trio.abc.Stream):
     async def on_tx(self, qpkt: QuicPacket) -> None:
         if self.is_closed:
             self._qlog.debug(f"Cannot send QUIC packet during connection closed - dropping.", packet=qpkt)
-            return
+            # return
 
         possible_ack_frame = self._pn_space.to_ack_frame(QuicFrameType.ACK, now=trio.current_time())
         if possible_ack_frame is not None:
