@@ -48,7 +48,7 @@ Terminology otherwise follows QUIC Transport {{RFC9000}}.
 
 QUIC-LY establishes a connection in one round trip, without TLS:
 
-* Client sends an Initial packet using QUIC-LY’s version with a CONFIG frame (optionally empty if defaults are used), any Stream data desired, and padding to reach a configured size (Section {{packet-types-and-headers}}).
+* Client sends an Initial packet using QUIC-LY's version with a CONFIG frame (optionally empty if defaults are used), any STREAM or DATAGRAM frames (if enabled via transport parameters) desired, and padding to reach a configured size (Section {{packet-types-and-headers}}).
 * Server responds with ACK (for the Initial) and CONFIG-ACK (if needed to override defaults or client values). Both endpoints then consider the connection established and proceed with Short Header packets.
 
 The CONFIG/CONFIG-ACK exchange carries a compact set of transport parameters using TLVs. Operators MAY omit CONFIG entries entirely and rely on prearranged defaults.
@@ -240,6 +240,7 @@ PARAM_ID = 0x08 , VALUE_LEN = 0 → bytes: 08 00
 * Frames: 
     * CONFIG (possibly empty TLV list if defaults are used).
     * Application STREAM data (optional).
+    * DATAGRAM frames (optional, if max_datagram_frame_size > 0 was advertised).
     * PADDING to reach the configured target.
 
 The INITIAL packet from the client to the server contains at a minimum a CONFIG frame, which could be empty (Length = 0 or omitted). This is because the original QUIC specification requires a payload of at least 1 byte.
@@ -274,6 +275,8 @@ QUIC-LY uses connection- and stream-level flow control as in {{RFC9000}} with li
 QUIC-LY supports sending data in DATAGRAM frames according to {{RFC9221}} if the respective transport parameter is set 
 to something larger than zero.  Endpoints that support unreliable messages advertise `max_datagram_frame_size > 0`. 
 Endpoints MUST NOT send DATAGRAM frames to a peer that did not advertise support.
+
+DATAGRAM frames MAY be sent in INITIAL packets alongside CONFIG frames when both endpoints have negotiated support via the `max_datagram_frame_size` transport parameter. This allows early application data to be transmitted during connection establishment.
 
 DATAGRAM frames are ack-eliciting and congestion-controlled. They are not retransmitted by the transport and are not 
 subject to stream flow control.
